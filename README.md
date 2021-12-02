@@ -10,6 +10,12 @@
 
 ##### Heading 5
 
+<!-- alternative heading -->
+Heading 1
+===========
+heading 2
+-----------
+
 <!--- Italic --->
 
 *italic test* 
