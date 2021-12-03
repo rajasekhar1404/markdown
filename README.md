@@ -19,7 +19,7 @@ heading 2
 <!--- Italic --->
 
 *italic test* 
-==============
+___
 
 _italic_
 
