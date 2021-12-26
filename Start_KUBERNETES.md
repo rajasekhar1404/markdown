@@ -5364,3 +5364,42 @@ PreStart hook might not execute before the ENTRYPOINT is called
 _Figure 42. Lifecycle Hooks_
 
 Let’s look at an example to see how these lifecycle handlers work.
+
+_ch3/deployment.yaml_
+
+```
+apiVersion: v1
+kind: Pod
+metadata:
+  name: hooks-pod
+spec:
+  containers:
+  - name: hooks-pod
+    image: kennethreitz/httpbin
+    lifecycle:
+      postStart:
+        exec:
+          command: ["/bin/sh", "-c", "echo Hello postStart! > /var/tmp/hello.txt"]
+      preStop:
+        exec:
+          command: ["/bin/sh","-c","sleep 10"]
+```
+
+In this Pod YAML, we define both hooks. In the preStart hook, we are writing "Hello postStart!" to a
+file in the container (**/var/tmp/hello.txt**). The Save the above YAML contents to **hooks-pod.yaml** and
+create the Pod:
+
+```
+$ kubectl apply -f hooks-pod.yaml
+pod/hooks-pod created
+```
+
+Once the Pod is running, we can check the contents of the **hello.txt** file inside the container:
+
+```
+$ kubectl exec -it hooks-pod -- cat /var/tmp/hello.txt
+Hello postStart!
+```
+
+If you delete the Pod, you will also notice that it takes an extra 10 seconds for Kubernetes to delete
+it.
