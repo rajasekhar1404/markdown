@@ -4570,17 +4570,19 @@ ReplicaSet. These replicas have different names and IP addresses, but other than
 same.
 
 Let’s consider the following snippet from one of the previous examples of a Pod and a PVC:
+
+```
 ...
 spec:
   containers:
-  ...
-  volumeMounts:
-  - name: pv-storage
-  mountPath: "/usr/share/nginx/html"
+    ...
+    volumeMounts:
+      - name: pv-storage
+        mountPath: "/usr/share/nginx/html"
   volumes:
-  - name: pv-storage
-  persistentVolumeClaim:
-  claimName: local-pv-claim
+    - name: pv-storage
+      persistentVolumeClaim:
+        claimName: local-pv-claim
 ....
 ---
 apiVersion: v1
@@ -4590,70 +4592,93 @@ metadata:
 spec:
   storageClassName: manual
   accessModes:
-  - ReadWriteOnce
+    - ReadWriteOnce
   resources:
-  requests:
-  storage: 1Gi
+    requests:
+      storage: 1Gi
+```
 The Volume and the persistent volume claim reference are both defined in the Pod spec, the
 template ReplicaSet uses to create the new Pods. If you have a single Pod, it will reference a single
 PVC and a single PV.
-117
-Figure 30. Single Pod with a PVC and PV
+
+
+![Figure 30. Single Pod with a PVC and PV](https://i.gyazo.com/18a28b9cde20b76d5da08fdd2f69edc2.png)
+_Figure 30. Single Pod with a PVC and PV_
+
 When you scale the Pods, each newly created Pod gets a different name and an IP address. Since
 you include PV and PVC in the Pod template, all replicas use the same PVC and the same PV as
 shown in the figure below.
-Figure 31. Multiple Pods with a Single PVC and PV
+
+![Figure 31. Multiple Pods with a Single PVC and PV](https://i.gyazo.com/69455f3e056e362387422cdb6cd9b116.png)
+_Figure 31. Multiple Pods with a Single PVC and PV_
+
 Because you defined the reference to the PVC in the Pod template, you can’t make each replica use
 its persistent volume claim. For that reason, you can’t use a single ReplicaSet to run a distributed
 data store where each Pod has its storage.
+
 There are a couple of workarounds, such as creating the Pods manually and have them use
 separate PVC in that way, however, you don’t want to manually manage the Pods' lifecycle
 (remember that any manually created Pod will not get automatically restarted when or if it
 crashes). Another workaround would be to use multiple ReplicaSets - one for each Pod. This
 solution could work; however, it is painful to maintain.
-118
+
 In addition to have a separate storage per Pod, you also need to ensure the Pods have a stable and
 persistent identity. Stable identity means if the Pod is restarted, it comes back with the same
 identifier (the same name and the same IP address). The reason for stable identity is that you often
 need to address a specific replicate, especially when running a storage system. That is complicated
 to do if you don’t have stable identifiers.
-A resource called a StatefulSet can help. You can use StatefulSets for applications that require a
+
+A resource called a __StatefulSet__ can help. You can use StatefulSets for applications that require a
 stable name and state. The main difference between a StatefulSet and a ReplicaSet is that when
 Pods created by a ReplicaSet are rescheduled, they get a new name and a new IP address. On the
 other hand, the StatefulSet ensures that Pod keeps the same name and the same IP address even
 when it gets rescheduled.
+
 StatefulSets also allow you to run multiple Pod replicas. These replicas are not the same - the can
 have their own set of volume claims or, more specifically volume claim templates. The replicas
 don’t have random names. Instead, each Pod gets assigned an index.
+
 We have mentioned earlier that in some scenarios, you want to be able to address a specific replica
 from the StatefulSet. You can do that by creating a headless Kubernetes service.
+
 In the next example, we will show how to run MongoDB using a StatefulSet. As the first step, we
-will create a headless service called mongodb. We need to create this first because we will reference
+will create a headless service called **mongodb**. We need to create this first because we will reference
 the service name in the StatefulSet.
-ch5/mongodb-svc.yaml
+
+_ch5/mongodb-svc.yaml_
+
+```
 apiVersion: v1
 kind: Service
 metadata:
   name: mongodb
   labels:
-  app: mongodb
+    app: mongodb
 spec:
   clusterIP: None
   selector:
-  app: mongodb
+    app: mongodb
   ports:
-  - port: 27017
-  targetPort: 27017
-Save the above YAML in mongodb-svc.yaml and create the Service by running kubectl apply -f
-mongodb-svc.yaml. If you list the Services, you will notice the mongodb Service does not have an IP
+    - port: 27017
+      targetPort: 27017
+```
+
+Save the above YAML in **mongodb-svc.yaml** and create the Service by running **kubectl apply -f
+mongodb-svc.yaml**. If you list the Services, you will notice the **mongodb** Service does not have an IP
 address set:
+
+```
 $ kubectl get svc
-NAME TYPE CLUSTER-IP EXTERNAL-IP PORT(S) AGE
-kubernetes ClusterIP 10.96.0.1 <none> 443/TCP 47h
-mongodb ClusterIP None <none> 27017/TCP 1s
+NAME        TYPE      CLUSTER-IP    EXTERNAL-IP     PORT(S)     AGE
+kubernetes  ClusterIP 10.96.0.1     <none>          443/TCP     47h
+mongodb     ClusterIP None          <none>          27017/TCP   1s
+```
+
 Next, we will create the following StatefulSet:
-119
-ch5/mongodb-statefulset.yaml
+
+_ch5/mongodb-statefulset.yaml_
+
+```
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -4662,33 +4687,362 @@ spec:
   serviceName: mongodb
   replicas: 1
   selector:
-  matchLabels:
-  app: mongodb
+    matchLabels:
+      app: mongodb
   template:
-  metadata:
-  labels:
-  app: mongodb
-  selector: mongodb
-  spec:
-  containers:
-  - name: mongodb
-  image: mongo:4.0.17
-  ports:
-  - containerPort: 27017
-  volumeMounts:
-  - name: pvc
-  mountPath: /data/db
+    metadata:
+      labels:
+        app: mongodb
+        selector: mongodb
+    spec:
+      containers:
+        - name: mongodb
+          image: mongo:4.0.17
+          ports:
+            - containerPort: 27017
+          volumeMounts:
+            - name: pvc
+              mountPath: /data/db
   volumeClaimTemplates:
-  - metadata:
-  name: pvc
-  spec:
-  accessModes:
-  - ReadWriteOnce
-  resources:
-  requests:
-  storage: 1Gi
+    - metadata:
+        name: pvc
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi
+```
+
 Looking at the YAML above, you will notice that it looks very similar to the ReplicaSet. The critical
-part is the volumeClaimTemplates section. That’s the section where we defined the
+part is the **volumeClaimTemplates** section. That’s the section where we defined the
 PersistentVolumeClaim. When the StatefulSet needs to create a new Pod replica, it uses that
 template also to create a PersistentVolume and a PersistentVolumeClaim resource for each Pod, as
 shown in the figure below.
+
+
+![Figure 32. Pods Created by StatefulSet](https://i.gyazo.com/fa80d350f0885da624f84f0d6719e4f1.png)
+_Figure 32. Pods Created by StatefulSet_
+
+Save the above YAML in **mongodb-statefulset.yaml** and create the StatefulSet by running **kubectl apply -f mongodb-statefulset.yaml**.
+
+If you list the Pods, you will notice you created a single Pod named **mongodb-0**:
+
+```
+$ kubectl get pods
+NAME        READY       STATUS      RESTARTS       AGE
+mongodb-0   1/1         Running     0              29m
+```
+
+Similarly, let’s list the PersistentVolumes and PersistentVolumeClaims:
+
+```
+$ kubectl get pv,pvc
+NAME                                                        CAPACITY      ACCESS MODES 
+RECLAIM POLICY      STATUS    CLAIM       STORAGECLASS REASON AGE
+persistentvolume/pvc-275f7731-0f10-4b33-b99a-3cc95d0be30a 1Gi RWO
+Delete              Bound default/pvc-mongodb-0 standard 31m
+
+NAME STATUS VOLUME
+CAPACITY ACCESS MODES STORAGECLASS AGE
+persistentvolumeclaim/pvc-mongodb-0 Bound pvc-275f7731-0f10-4b33-b99a-3cc95d0be30a 1Gi RWO standard 31m
+```
+Notice the naming of both resources - the PVC uses the name (**pvc**) we provided under the
+**volumeClaimTemplates**, and it appends the name of the Pod (**mongodb-0**) to it. Kubernetes prefixes the
+PersistentVolume name with the PVC name (**pvc**). The rest of the name is a unique identifier.
+
+Let’s see what happens if we scale the StatefulSet to 3 Pods:
+
+```
+$ kubectl scale statefulset mongodb --replicas=3
+statefulset.apps/mongodb scaled
+```
+
+If you watch the Pods as Kubernetes creates them (**kubectl get pods -w**) you will notice they are
+created in order - the replica named **mongodb-1** is created first, and after that replica **mongodb-2** is
+created.
+
+A StatefulSet stores the name of the pod in label called **statefulset.kubernetes.io/pod-name**. You can
+see these labels if you run **kubectl get po --show-labels**:
+
+```
+$ kubectl get po --show-labels
+NAME        READY     STATUS    RESTARTS    AGE     LABELS
+mongodb-0   1/1       Running   0           44m     statefulset.kubernetes.io/pod-name
+=mongodb-0
+mongodb-1   1/1       Running   0           2m34s   statefulset.kubernetes.io/pod-name
+=mongodb-1
+mongodb-2   1/1       Running   0           2m30s   statefulset.kubernetes.io/pod-name
+=mongodb-2
+```
+
+These Pods have other labels (**selector**, **app**, **controller-revision-hash**). I removed them from the
+above output for better readability.
+
+Using this label, you could create a service to target a specific replica. Remember when we created
+a headless service? Let’s see how we can use it to access a particular replica.
+
+We have 3 Pods running, and they are named **mongodb-0**, **mongodb-1**, and **mongodb-2**. We also have a
+headless service called **mongodb**. To access each instance, we use the following format
+**[podName].[serviceName]**. For example, to access **mongodb-1** we can use **mongodb-1.mongodb** or ***mongodb-1.mongodb.default.svc.cluster.local**, where **default** is the namespace where the Pods (and Service)
+reside, and cluster.local is the local cluster domain.
+
+Let’s try accessing these instances. We will run a **mongo** container inside the cluster and use that
+container to access the **mongodb-0**,**mongodb-1**, and **mongodb-2** instances.
+Run the following command to get create a Pod called **mongo-shell** and run a **/bin/bash** inside it:
+
+```
+$ kubectl run -it mongo-shell --image=mongo:4.0.17 --rm -- /bin/bash
+If you don\'t see a command prompt, try pressing enter.
+root@mongo-shell: # /
+```
+
+The container has the **mongo** shell installed, and we can use this binary to connect to the MongoDB
+instances. Let’s try and connect to the **mongodb-0** instance.
+
+To do that, we will use the **mongodb-0.mongodb** name - remember that this only works because we are
+running the **mongo-shell** container inside of the cluster.
+
+```
+root@mongo-shell:/# mongo mongodb-0.mongodb
+MongoDB shell version v4.0.17
+connecting to: mongodb://mongodb-0.mongodb:27017/test?gssapiServiceName=mongodb
+Implicit session: session { "id" : UUID("7972f9c4-f04e-42fe-aa15-e63adfaea2eb") }
+MongoDB server version: 4.0.17
+Welcome to the MongoDB shell.
+....
+...
+>
+```
+
+The shell will automatically connect us to the collection called test. Let’s insert a dummy entry into
+that collection so that we can prove the MongoDB instances are each storing the data in a different
+volume.
+
+Run the command below to insert a single entry with the name field set to **first MongoDB instance**:
+
+```
+> db.test.insert({ name: "first MongoDB instance" })
+WriteResult({ "nInserted" : 1 })
+```
+
+You can also run **db.test.find()** to list all documents from the **test** collection (there will only be one
+in there):
+```
+> db.test.find()
+{ "_id" : ObjectId("5f540f288a4810beb9d9237a"), "name" : "first MongoDB instance" }
+```
+Let’s connect to the second instance now. You can type exit to **exit** the first instance, and get back to
+the **mongo-shell** container. Just like before, we will use the **mongo** binary to connect to a different
+instance:
+
+```
+$ root@mongo-shell:/# mongo mongodb-1.mongodb
+```
+
+Once connected, you can look at the contents of the **test** collection and, as expected, there will be 0
+documents in the collection:
+
+```
+> db.test.find()
+>
+```
+
+We can create a different document here:
+
+```
+> db.test.insert({ name: "second MongoDB instance" })
+WriteResult({ "nInserted" : 1 })
+```
+
+Let’s see if the data is persistent when we delete the **mongodb-1** Pod. Open a separate terminal
+window and delete the **mongodb-1** Pod:
+
+```
+$ kubectl delete po mongodb-1
+pod "mongodb-1" deleted
+```
+
+As soon as the Pod is deleted, StatefulSet will re-create it again - it will use the same name, PVC and
+PV. If you run the **db.test.find()** from the mongo shell in the first terminal window you will notice
+that it contains the same data we inserted earlier right after it reconnects to the Pod:
+
+```
+> db.test.find()
+2020-09-05T22:29:43.690+0000 I NETWORK [js] trying reconnect to mongodb-1.mongodb:27017 failed
+2020-09-05T22:29:43.693+0000 I NETWORK [js] reconnect mongodb-1.mongodb:27017 ok
+{ "_id" : ObjectId("5f5411034901f8a94bfdcc7c"), "name" : "second MongoDB instance" }
+```
+
+Organizing Containers
+Init containers
+Init containers allow you to separate your application from the initialization logic and provide a
+way to run the initialization tasks such as setting up permissions, database schemas, or seeding
+data for the main application, etc. The init containers may also include any tools or binaries that
+you don’t want to have in your primary container image due to security reasons.
+The init containers are executed in a sequence before your primary or application containers start.
+On the other hand, any application containers have a non-deterministic startup order, so you can’t
+use them for the initialization type of work.
+The figure below shows the execution flow of the init containers and the application containers.
+Figure 33. Init Containers
+The application containers will wait for the init containers to complete successfully before starting.
+If the init containers fail, the Pod is restarted (assuming we didn’t set the restart policy to
+125
+RestartNever), which causes the init containers to run again. When designing your init containers,
+make sure they are idempotent, to run multiple times without issues. For example, if you’re seeding
+the database, check if it already contains the records before re-inserting them again.
+Since init containers are part of the same Pod, they share the volumes, network, security settings,
+and resource limits, just like any other container in the Pod.
+Let’s look at an example where we use an init container to clone a GitHub repository to a shared
+volume between all containers. The Github repo contains a single index.html. Once the repo is
+cloned and the init container has executed, the primary container running the Nginx server can use
+index.html from the shared volume and serve it.
+You define the init containers under the spec using the initContainers field, while you define the
+application containers under the containers field. We define an emptyDir volume and mount it into
+both the init and application container. When the init container starts, it will run the git clone
+command and clone the repository into the /usr/share/nginx/html folder. This folder is the default
+folder Nginx serves the HTML pages from, so when the application container starts, we will be able
+to access the HTML page we cloned.
+ch6/init-container.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: website
+spec:
+  initContainers:
+  - name: clone-repo
+  image: alpine/git
+  command:
+  - git
+  - clone
+  - --progress
+  - https://github.com/peterj/simple-http-page.git
+  - /usr/share/nginx/html
+  volumeMounts:
+  - name: web
+  mountPath: "/usr/share/nginx/html"
+  containers:
+  - name: nginx
+  image: nginx
+  ports:
+  - name: http
+  containerPort: 80
+  volumeMounts:
+  - name: web
+  mountPath: "/usr/share/nginx/html"
+  volumes:
+  - name: web
+  emptyDir: {}
+126
+Save the above YAML to init-container.yaml and create the Pod using kubectl apply -f initcontainer.yaml.
+If you run kubectl get pods right after the above command, you should see the status of the init
+container:
+$ kubectl get po
+NAME READY STATUS RESTARTS AGE
+website 0/1 Init:0/1 0 1s
+The number 0/1 indicates a total of 1 init containers, and 0 containers have been completed so far.
+In case the init container fails, the status changes to Init:Error or Init:CrashLoopBackOff if the
+container fails repeatedly.
+You can also look at the events using the describe command to see what happened:
+Normal Scheduled 19s default-scheduler Successfully assigned default/website to
+minikube
+Normal Pulling 18s kubelet, minikube Pulling image "alpine/git"
+Normal Pulled 17s kubelet, minikube Successfully pulled image "alpine/git"
+Normal Created 17s kubelet, minikube Created container clone-repo
+Normal Started 16s kubelet, minikube Started container clone-repo
+Normal Pulling 15s kubelet, minikube Pulling image "nginx"
+Normal Pulled 13s kubelet, minikube Successfully pulled image "nginx"
+Normal Created 13s kubelet, minikube Created container nginx
+Normal Started 13s kubelet, minikube Started container nginx
+You will notice as soon as Kubernetes schedules the Pod, the first Docker image is pulled (
+alpine/git), and the init container (clone-repo) is created and started. Once that’s completed (the
+container cloned the repo) the main application container (nginx) starts.
+Additionally, you can also use the logs command to get the logs from the init container by
+specifying the container name using the -c flag:
+$ kubectl logs website -c clone-repo
+Cloning into '/usr/share/nginx/html'...
+remote: Enumerating objects: 6, done.
+remote: Counting objects: 100% (6/6), done.
+remote: Compressing objects: 100% (4/4), done.
+remote: Total 6 (delta 0), reused 0 (delta 0), pack-reused 0
+Receiving objects: 100% (6/6), done.
+Finally, to actually see the static HTML page can use port-forward to forward the local port to the
+port 80 on the container:
+127
+$ kubectl port-forward pod/website 8000:80
+Forwarding from 127.0.0.1:8000 -> 80
+Forwarding from [::1]:8000 -> 80
+You can now open your browser at http://localhost:8000 to open the static page as shown in figure
+below.
+Figure 34. Static HTML from Github repo
+Lastly, delete the Pod by running kubectl delete po website.
+Sidecar container pattern
+The sidecar container aims to add or augment an existing container’s functionality without
+changing the container. In comparison to the init container, we discussed previously, the sidecar
+container starts and runs simultaneously as your application container. The sidecar is just a second
+container you have in your container list, and the startup order is not guaranteed.
+Probably one of the most popular implementations of the sidecar container is in Istio service mesh.
+The sidecar container (an Envoy proxy) is running next to the application container and
+intercepting inbound and outbound requests. In this scenario, the sidecar adds the functionality to
+the existing container and allows the operator to do traffic routing, failure injection, and other
+features.
+128
+Figure 35. Sidecar Pattern
+A simpler idea might be having a sidecar container (log-collector) that collects and stores
+application container’s logs. That way, as an application developer, you don’t need to worry about
+collecting and storing logs. You only need to write logs to a location (a volume, shared between the
+containers) where the sidecar container can collect them and send them to further processing or
+archive them.
+If we continue with the example we used for the init container; we could create a sidecar container
+that periodically updates runs git pull and updates the repository. For this to work, we will keep
+the init container to do the initial clone, and a sidecar container that will periodically (every 60
+seconds for example) check and pull the repository changes.
+To try this out, make sure you fork the original repository (https://github.com/peterj/simple-httppage.git) and use your fork in the YAML below.
+129
+ch6/sidecar-container.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: website
+spec:
+  initContainers:
+  - name: clone-repo
+  image: alpine/git
+  command:
+  - git
+  - clone
+  - --progress
+  - https://github.com/peterj/simple-http-page.git
+  - /usr/share/nginx/html
+  volumeMounts:
+  - name: web
+  mountPath: "/usr/share/nginx/html"
+  containers:
+  - name: nginx
+  image: nginx
+  ports:
+  - name: http
+  containerPort: 80
+  volumeMounts:
+  - name: web
+  mountPath: "/usr/share/nginx/html"
+  - name: refresh
+  image: alpine/git
+  command:
+  - sh
+  - -c
+  - watch -n 60 git pull
+  workingDir: /usr/share/nginx/html
+  volumeMounts:
+  - name: web
+  mountPath: "/usr/share/nginx/html"
+  volumes:
+  - name: web
+  emptyDir: {}
+We added a container called refresh to the YAML above. It uses the alpine/git image, the same
+image as the init container, and runs the watch -n 60 git pull command.
+NOTE
+The watch command periodically executes a command. In our case, it executes git
+pull command and updates the local repository every 60 seconds.
+Another field we haven’t mentioned before is workingDir. This field will set the working directory
+for the container. We are setting it to /usr/share/nginx/html as that’s where we originally cloned the
