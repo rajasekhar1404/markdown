@@ -4254,3 +4254,441 @@ define the storage capacity (5 gibibytes), the access mode (**ReadWriteOnce**), 
 can only be mounted as read-write by a single node.
 
 There are three different access modes we can choose from:
+
+_Table 3. Access Modes_
+
+| Access mode | Short name | Description |
+|-------------|------------|-------------|
+| ReadWriteOnce | RWO | The volume can be mounted as read-write by a single node only |
+| ReadOnlyMany | ROX | The volume can be mounted read-only by many nodes |
+| ReadWriteMany | RWX | The volume can be mounted as read-write by many nodes |
+
+Note that not all volume plugins support all access modes. For example, the **hostPath** plugin only
+supports the **ReadWriteOnce** access mode, and so does the Azure Disk plugin. However, Azure File,
+Glusterfs, and a couple of other plugins support all three access modes.
+
+Let’s save the YAML below in **local-pv.yaml** and run **kubectl apply -f local-pv.yaml** to create the
+PersistentVolume.
+
+_ch5/local-pv.yaml_
+
+```
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: local-pv-volume
+spec:
+  storageClassName: manual
+  capacity:
+  storage: 5Gi
+  accessModes:
+    - ReadWriteOnce
+  hostPath:
+    path: "/mnt/data"
+```
+
+You can view the created persistent volume by running the following command:
+
+```
+$ kubectl get pv
+NAME            CAPACITY    ACCESS MODES    RECLAIM POLICY    STATUS    CLAIM
+STORAGECLASS    REASON    AGE
+local-pv-volume 5Gi         RWO             Retain            Available
+manual                    16s
+```
+
+The reclaim policy for the volume (**Retain** in the above case) specifies that Kubernetes retains the
+data, and it’s up to the user/administrator to reclaim the space manually. The other two options are
+**Recycle** where volume contents are deleted, and **Delete** that applies to cloud-provider backed
+storage where the storage resource is deleted.
+
+Now that we have the persistent volume, we can create a persistent volume claim to request
+storage. Let’s look at the YAML first and then explain the different fields:
+
+_ch5/local-pvc.yaml_
+
+```
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: local-pv-claim
+spec:
+  storageClassName: manual
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+```
+
+Using the above claim we request 1Gb of storage using the **manual** storage class name and RWO
+access mode. Surprise, surprise, this exactly matches the persistent volume we create before.
+
+Save the above YAML in **local-pvc.yaml** and run **kubectl apply -f local-pvc.yaml** to create the
+PersistentVolumeClaim.
+
+If we look at the status of the persistent volume and run the **kubectl get pv** command, you will
+notice the **STATUS** column shows the **Bound** status and the **CLAIM** column shows the name of the claim:
+
+```
+$ kubectl get pv
+NAME              CAPACITY      ACCESS MODES      RECLAIM POLICY    STATUS    CLAIM
+STORAGECLASS REASON AGE
+local-pv-volume   5Gi           RWO               Retain            Bound     default/local-pv-claim manual     14m
+```
+
+You can also see the Volume name and status by looking at the PVC:
+
+```
+$ kubectl get pvc
+NAME             STATUS    VOLUME           CAPACITY     ACCESS MODES    STORAGECLASS
+AGE
+local-pv-claim   Bound     local-pv-volume  5Gi          RWO             manual
+19s
+```
+
+Before we create a Pod that consumes this Volume, let’s create a file in the **/mnt/data** folder on the
+host.
+
+If you’re using Docker Desktop, you can use the command below to get into the virtual machine
+(host):
+
+```
+docker run -it --privileged --pid=host debian nsenter -t 1 -m -u -n -i sh
+```
+
+If you’re using Minikube, the equivalent command is **minikube ssh**.
+
+Once inside the host, let’s start by creating the **/mnt/data** folder. If you’re using Docker Desktop,
+create the folder under the **/containers/services/docker/rootfs** folder. If using Minikube, just
+create the **/mnt/data** folder.
+
+The data folder will have an **index.html** file inside. In the Pod, we will run an Nginx container that
+will show that **index.html** file.
+
+```
+# create the folder (Docker Desktop)
+mkdir -p /containers/services/docker/rootfs/mnt/data
+
+# create the folder (Minikube)
+sudo mkdir -p /mnt/data
+
+# create index.html (Docker Desktop)
+echo "Hello from Storage!" >> /containers/services/docker/rootfs/mnt/data/index.html
+
+# create index.html (Minikube)
+sudo sh -c "echo 'Hello from Storage!' > /mnt/data/index.html"
+
+# exit the shell
+exit
+```
+
+With the volume populated, let’s create a Pod that consumes the volume:
+
+_ch5/pv-pod.yaml_
+
+```
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pv-pod
+spec:
+  containers:
+    - name: nginx
+      image: nginx
+      ports:
+        - name: http
+          containerPort: 80
+      volumeMounts:
+        - name: pv-storage
+          mountPath: "/usr/share/nginx/html"
+  volumes:
+    - name: pv-storage
+      persistentVolumeClaim:
+        claimName: local-pv-claim
+```
+
+We refer to the persistent volume claim under **volumes**, not to the underlying volume. Inside the
+**containers** field, we are then referencing the volume (**pv-storage**) and mounting it under
+**/usr/share/nginx/html** (this is the folder Nginx uses by default).
+
+Save the above YAML in **pv-pod.yaml** file and create it by running **kubectl apply -f pv-pod.yaml**.
+
+To check if the volume mount worked correctly, we are going to use the **port-forward** command to forward port **5000** on the local machine to port **80** on the container. Open a separate terminal window and run:
+
+```
+$ kubectl port-forward po/pv-pod 5000:80
+Forwarding from 127.0.0.1:5000 -> 80
+Forwarding from [::1]:5000 -> 80
+```
+
+You can either open a browser and navigate to http://localhost:5000 or run **curl**
+http://localhost:5000 from another terminal window. You should get back the contents of the
+**index.html** file we created earlier:
+
+```
+$ curl http://localhost:5000
+Hello from Storage!
+```
+
+You can clean up everything by deleting the Pod, PVC, and then the PV:
+
+```
+$ kubectl delete po pv-pod
+$ kubectl delete pv local-pv-volume
+$ kubectl delete pvc local-pv-claim
+```
+
+Finally, you can also delete the contents of the **/mnt/data** folder inside the host VM.
+
+
+### **Using Storage Class for dynamic provisioning**
+
+In the previous examples, we manually created a PersistentVolume first (using **manual** storage class),
+before we could claim the storage and then use it.
+
+Both Minikube and Docker Desktop have a default storage class set - in both cases, they use the
+**hostPath** provisioner.
+
+Let’s try and create a persistent volume claim, but this time we won’t specify the storage class field
+at all:
+
+_ch5/default-pvc.yaml_
+
+```
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: default-pv-claim
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+```
+
+Save the above YAML in **default-pvc.yaml** and run **kubectl apply -f default-pvc.yaml** to create the
+persistent volume claim that uses the default storage class.
+
+If you list the PVC, you will notice that it was bound to a volume called **pvc-bf222497-024e-4ff1-
+a29f-1f4d3a441607** using **hostpath** storage class (this is the default storage class name if using Docker
+Desktop).
+
+```
+$ kubectl get pvc
+NAME              STATUS    VOLUME                                    CAPACITY
+ACCESS MODES STORAGECLASS AGE
+default-pv-claim  Bound     pvc-d1cb8b49-bb9b-499b-baca-3631b40a44bf  1Gi       RWO
+hostpath                  3s
+```
+
+You can also list the PV to see the persistent volume that was created dynamically by the storage
+class:
+
+```
+$ kubectl get pv
+NAME                                      CAPACITY      ACCESS MODES      RECLAIM POLICY
+STATUS       CLAIM            STORAGECLASS        REASON        AGE
+pvc-d1cb8b49-bb9b-499b-baca-3631b40a44bf  1Gi           RWO               Delete
+Bound        default/default-pv-claim hostpath                  90s
+```
+
+On Docker Desktop the volume gets created under **/var/lib/k8s-pvs/[pvc-name]/[pv-name]** folder on
+the host VM, where the PVC name in our case is **default-pv-claim** and the PV name is that randomly
+generate volume name (**pvc-d1cb8b49-bb9b-499b-baca-3631b40a44bf**).
+
+So, let’s get a shell inside the VM and create an index.html file, just like we did before:
+
+```
+# Get a shell inside host VM
+docker run -it --privileged --pid=host debian nsenter -t 1 -m -u -n -i sh
+
+# Create index.html file
+echo "Hello Dynamic Volume!" >> /var/lib/k8s-pvs/default-pv-claim/pvc-d1cb8b49-bb9b499b-baca-3631b40a44bf/index.html
+
+# exit the VM
+exit
+```
+
+Finally, let’s create the Pod - the resource looks exactly the same as before, the only difference is the
+PVC name:
+
+_ch5/default-pv-pod.yaml_
+
+```
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pv-pod
+spec:
+  containers:
+    - name: nginx
+      image: nginx
+      ports:
+        - name: http
+          containerPort: 80
+      volumeMounts:
+        - name: pv-storage
+          mountPath: "/usr/share/nginx/html"
+  volumes:
+    - name: pv-storage
+      persistentVolumeClaim:
+        claimName: default-pv-claim
+```
+
+Save the above YAML in **default-pv-pod.yaml** and run **kubectl apply -f default-pv-pod.yaml** to
+create the Pod.
+
+When the Pod starts running, use **port-forward** to forward local port **5000** to the port **80** on the
+container:
+
+```
+$ kubectl port-forward po/pv-pod 5000:80
+Forwarding from 127.0.0.1:5000 -> 80
+Forwarding from [::1]:5000 -> 80
+```
+
+Just like before, you can open http://localhost:5000 in the browser or run the curl command to get
+back the response, contents of the **index.html** file:
+
+```
+$ curl http://localhost:5000
+Hello Dynamic Volume!
+```
+
+If you delete the Pod and then the PVC, you will notice that the Persistent Volume gets deleted
+automatically. The automatic deletion is due to the reclaim policy on the default storage class. The
+value is set to **Delete**, and Kubernetes controller automatically deletes the volume once the claim is
+gone.
+
+
+## Running stateful workloads with StatefulSets
+
+Using PersistentVolumes and PersistentVolumeClaims, you could run multiple Pod replicas using a
+ReplicaSet. These replicas have different names and IP addresses, but other than that, they are the
+same.
+
+Let’s consider the following snippet from one of the previous examples of a Pod and a PVC:
+...
+spec:
+  containers:
+  ...
+  volumeMounts:
+  - name: pv-storage
+  mountPath: "/usr/share/nginx/html"
+  volumes:
+  - name: pv-storage
+  persistentVolumeClaim:
+  claimName: local-pv-claim
+....
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: local-pv-claim
+spec:
+  storageClassName: manual
+  accessModes:
+  - ReadWriteOnce
+  resources:
+  requests:
+  storage: 1Gi
+The Volume and the persistent volume claim reference are both defined in the Pod spec, the
+template ReplicaSet uses to create the new Pods. If you have a single Pod, it will reference a single
+PVC and a single PV.
+117
+Figure 30. Single Pod with a PVC and PV
+When you scale the Pods, each newly created Pod gets a different name and an IP address. Since
+you include PV and PVC in the Pod template, all replicas use the same PVC and the same PV as
+shown in the figure below.
+Figure 31. Multiple Pods with a Single PVC and PV
+Because you defined the reference to the PVC in the Pod template, you can’t make each replica use
+its persistent volume claim. For that reason, you can’t use a single ReplicaSet to run a distributed
+data store where each Pod has its storage.
+There are a couple of workarounds, such as creating the Pods manually and have them use
+separate PVC in that way, however, you don’t want to manually manage the Pods' lifecycle
+(remember that any manually created Pod will not get automatically restarted when or if it
+crashes). Another workaround would be to use multiple ReplicaSets - one for each Pod. This
+solution could work; however, it is painful to maintain.
+118
+In addition to have a separate storage per Pod, you also need to ensure the Pods have a stable and
+persistent identity. Stable identity means if the Pod is restarted, it comes back with the same
+identifier (the same name and the same IP address). The reason for stable identity is that you often
+need to address a specific replicate, especially when running a storage system. That is complicated
+to do if you don’t have stable identifiers.
+A resource called a StatefulSet can help. You can use StatefulSets for applications that require a
+stable name and state. The main difference between a StatefulSet and a ReplicaSet is that when
+Pods created by a ReplicaSet are rescheduled, they get a new name and a new IP address. On the
+other hand, the StatefulSet ensures that Pod keeps the same name and the same IP address even
+when it gets rescheduled.
+StatefulSets also allow you to run multiple Pod replicas. These replicas are not the same - the can
+have their own set of volume claims or, more specifically volume claim templates. The replicas
+don’t have random names. Instead, each Pod gets assigned an index.
+We have mentioned earlier that in some scenarios, you want to be able to address a specific replica
+from the StatefulSet. You can do that by creating a headless Kubernetes service.
+In the next example, we will show how to run MongoDB using a StatefulSet. As the first step, we
+will create a headless service called mongodb. We need to create this first because we will reference
+the service name in the StatefulSet.
+ch5/mongodb-svc.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongodb
+  labels:
+  app: mongodb
+spec:
+  clusterIP: None
+  selector:
+  app: mongodb
+  ports:
+  - port: 27017
+  targetPort: 27017
+Save the above YAML in mongodb-svc.yaml and create the Service by running kubectl apply -f
+mongodb-svc.yaml. If you list the Services, you will notice the mongodb Service does not have an IP
+address set:
+$ kubectl get svc
+NAME TYPE CLUSTER-IP EXTERNAL-IP PORT(S) AGE
+kubernetes ClusterIP 10.96.0.1 <none> 443/TCP 47h
+mongodb ClusterIP None <none> 27017/TCP 1s
+Next, we will create the following StatefulSet:
+119
+ch5/mongodb-statefulset.yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mongodb
+spec:
+  serviceName: mongodb
+  replicas: 1
+  selector:
+  matchLabels:
+  app: mongodb
+  template:
+  metadata:
+  labels:
+  app: mongodb
+  selector: mongodb
+  spec:
+  containers:
+  - name: mongodb
+  image: mongo:4.0.17
+  ports:
+  - containerPort: 27017
+  volumeMounts:
+  - name: pvc
+  mountPath: /data/db
+  volumeClaimTemplates:
+  - metadata:
+  name: pvc
+  spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+  requests:
+  storage: 1Gi
+Looking at the YAML above, you will notice that it looks very similar to the ReplicaSet. The critical
+part is the volumeClaimTemplates section. That’s the section where we defined the
+PersistentVolumeClaim. When the StatefulSet needs to create a new Pod replica, it uses that
+template also to create a PersistentVolume and a PersistentVolumeClaim resource for each Pod, as
+shown in the figure below.
