@@ -4224,23 +4224,33 @@ require us to set parameters such as URL cluster ID, secret name, etc.
 A Kubernetes cluster running with Docker Desktop uses a **hostpath** storage class provisioner. You
 can get a list of all storage classes in your cluster by running the following command:
 
+```
 # Docker Desktop
 $ kubectl get storageclass
-NAME PROVISIONER AGE
-hostpath (default) docker.io/hostpath 44h
+NAME                PROVISIONER         AGE
+hostpath (default)  docker.io/hostpath  44h
+```
+
 Similarly, a cluster running with Minikube has the following storage class:
+
+```
 # Minikube
 $ kubectl get storageclass
-NAME PROVISIONER RECLAIMPOLICY VOLUMEBINDINGMODE
+NAME                  PROVISIONER               RECLAIMPOLICY       VOLUMEBINDINGMODE
 ALLOWVOLUMEEXPANSION AGE
-standard (default) k8s.io/minikube-hostpath Delete Immediate
-false 2m49s
-You will also notice the word default next to the hostpath storage class name. You can mark a
+standard (default)    k8s.io/minikube-hostpath  Delete              Immediate
+false                2m49s
+```
+
+You will also notice the word __default__ next to the **hostpath** storage class name. You can mark a
 storage class as default, so when, for example, you request some storage using a PVC without
 specifying the storage class, Kubernetes uses the default storage class.
-Creating Persistent Volumes
+
+### **Creating Persistent Volumes**
+
 Let’s start by creating a persistent volume using the hostPath volume plugin. In the resource, we
-define the storage capacity (5 gibibytes), the access mode (ReadWriteOnce), and a host path of
-/mnt/data. This means that we will allocate 5Gi on the node in the folder /mnt/data, and the Volume
+define the storage capacity (5 gibibytes), the access mode (**ReadWriteOnce**), and a host path of
+**/mnt/data**. This means that we will allocate 5Gi on the node in the folder **/mnt/data**, and the Volume
 can only be mounted as read-write by a single node.
+
 There are three different access modes we can choose from:
