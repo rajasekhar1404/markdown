@@ -5093,4 +5093,274 @@ __NOTE__:
 >The **watch** command periodically executes a command. In our case, it executes **git pull** command and updates the local repository every 60 seconds.
 
 Another field we haven’t mentioned before is **workingDir**. This field will set the working directory
-for the container. We are setting it to **/usr/share/nginx/html** as that’s where we originally cloned the
+for the container. We are setting it to **/usr/share/nginx/html** as that’s where we originally cloned the repo to using the init container.
+
+Save the above YAML to **sidecar-container.yaml** and create the Pod using **kubectl apply -f sidecar-container.yaml**.
+
+If you run **kubectl get pods** once the init container has executed, you will notice the **READY** column
+now shows **2/2**. These numbers tell you right away that this Pod has a total of two containers, and
+both of them are ready:
+
+```
+$ kubectl get po
+NAME      READY    STATUS    RESTARTS     AGE
+website   2/2      Running   0            3m39s
+```
+
+If you set up the port forward to the Pod using **kubectl port-forward pod/website 8000:80** command
+and open the browser to http://localhost:8000, you will see the same webpage as before.
+
+We can open a separate terminal window and watch the logs from the refresh container inside the
+**website** Pod:
+
+```
+$ kubectl logs website -c refresh -f
+
+Every 60.0s: git pull
+Already up to date.
+```
+
+The **watch** command is running, and the response from the last **git pull** command was Already up
+to date. Let’s make a change to the index.html in the repository you forked.
+
+I added < div> element and here’s how the updated **index.html** file looks like:
+
+_ch6/index.html_
+```
+<html>
+  <head>
+    <title>Hello from Simple-http-page</title>
+  </head>
+  <body>
+    <h1>Welcome to simple-http-page</h1>
+    <div>Hello!</div>
+  </body>
+</html>
+```
+Next, you need to stage this and commit it to the **master** branch. The easiest way to do that is from
+the Github’s webpage. Open the **index.html** on Github (I am opening https://github.com/peterj/
+simple-http-page/blob/master/index.html, but you should replace my username **peterj** with your
+username or the organization you forked the repo to) and click the pencil icon to edit the file (see
+the figure below).
+
+![Figure 36. Editing index.html on Github](https://i.gyazo.com/9ab9de042cae56ced7964bc7a310c960.png)
+
+_Figure 36. Editing index.html on Github_
+
+Make the change to the **index.html** file and click the __Commit changes__ button to commit them to the
+branch. Next, watch the output from the refresh container, and you should see the output like this:
+
+```
+Every 60.0s: git pull
+
+From https://github.com/peterj/simple-http-page
+  f804d4c..ad75286 master -> origin/master
+Updating f804d4c..ad75286
+Fast-forward
+ index.html | 1 +
+ 1 file changed, 1 insertion(+)
+```
+
+The above output indicates changes to the repository. Git pulls the updated file to the shared
+volume. Finally, refresh your browser where you have http://localhost:8000 opened, and you will
+notice the changes on the page:
+
+![Figure 37. Updated index.html page](https://i.gyazo.com/bb59db5b601fefc4306e1a55f74e330a.png)
+
+_Figure 37. Updated index.html page_
+
+You can make more changes, and each time, the page will get updated within 60 seconds. You can
+delete the Pod by running **kubectl delete po website**.
+
+## Ambassador container pattern
+
+The ambassador container pattern aims to hide the primary container’s complexity and provide a
+unified interface through which the primary container can access services outside of the Pod.
+
+
+![Figure 38. Ambassador Pattern](https://i.gyazo.com/c59c4c12ff99528b06b1794c0894eb66.png)
+
+_Figure 38. Ambassador Pattern_
+
+These outside or external services might present different interfaces and have other APIs. Instead
+of writing the code inside the main container that can deal with these external services' multiple
+interfaces and APIs, you implement it in the ambassador container. The ambassador container
+knows how to talk to and interpret responses from different endpoints and pass them to the main
+container. The main container only needs to know how to talk to the ambassador container. You
+can then re-use the ambassador container with any other container that needs to talk to these
+services while maintaining the same internal interface.
+
+Another example would be where your main containers need to make calls to a protected API. You
+could design your ambassador container to handle the authentication with the protected API. Your
+main container will make calls to the ambassador container. The ambassador will attach any
+needed authentication information to the request and make an authenticated request to the
+external service.
+
+![Figure 39. Calls Through Ambassador](https://i.gyazo.com/b4e7d2ca7b5a2184b5d8336a5e4cf364.png)
+
+_Figure 39. Calls Through Ambassador_
+
+To demonstrate how the ambassador pattern works, we will use The Movie DB
+(TMBD)[https://www.themoviedb.org/]. Head over to the website and register (it’s free) to get an API
+key.
+
+The Movie DB website offers a REST API where you can get information about the movies. We have
+implemented an ambassador container that listens on path **/movies**, and whenever it receives a
+request, it will make an authenticated request to the API of The Movie DB.
+
+Here’s the snippet from the code of the ambassador container:
+
+```
+func TheMovieDBServer(w http.ResponseWriter, r *http.Request) {
+  apiKey := os.Getenv("API_KEY")
+  resp, err := http.Get(fmt.Sprintf
+("https://api.themoviedb.org/3/discover/movie?api_key=%s", apiKey))
+  // ...
+  // Return the response
+}
+```
+We will read the API_KEY environment variable and then make a GET request to the URL. Note if you
+try to request to URL without the API key, you’ll get the following error:
+
+```
+$ curl https://api.themoviedb.org/3/discover/movie
+{"status_code":7,"status_message":"Invalid API key: You must be granted a valid key."
+,"success":false}
+```
+
+I have pushed the ambassador’s Docker image to **startkubernetes/ambassador:0.1.0**.
+
+Just like with the sidecar container, the ambassador container is just another container that’s
+running in the Pod. We will test the ambassador container by calling curl from the main container.
+
+Here’s how the YAML file looks like:
+
+_ch6/ambassador-container.yaml_
+```
+apiVersion: v1
+kind: Pod
+metadata:
+  name: themoviedb
+spec:
+  containers:
+    - name: main
+      image: radial/busyboxplus:curl
+      args:
+        - sleep
+        - "600"
+    - name: ambassador
+      image: startkubernetes/ambassador:0.1.0
+      env:
+        - name: API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: themoviedb
+              key: apikey
+      ports:
+        - name: http
+          containerPort: 8080
+```
+Before we can create the Pod, we need to create a Secret with the API key. Let’s do that first:
+
+```
+$ kubectl create secret generic themoviedb --from-literal=apikey=<INSERT YOUR API KEY
+HERE>
+secret/themoviedb created
+```
+
+You can now store the Pod YAML in **ambassador-container.yaml** file and create it with **kubectl apply -f ambassador-container.yaml**.
+
+When Kubernetes creates the Pod (you can use **kubectl get po** to see the status), you can use the
+**exec** command to run the **curl** command inside the **main** container:
+
+```
+$ kubectl exec -it themoviedb -c main -- curl localhost:8080/movies
+
+{"page":1,"total_results":10000,"total_pages":500,"results":[{"popularity":2068.491,"v
+ote_count":
+...
+```
+
+Since containers within the same Pod share the network, we can make a request against
+**localhost:8080**, which corresponds to the port on the ambassador container.
+
+You could imagine running an application or a web server in the main container, and instead of
+making requests to the **api.themoviedb.org** directly, you are making requests to the ambassador
+container.
+
+Similarly, if you had any other service that needed access to the **api.themoviedb.org** you could add
+the ambassador container to the Pod and solve access like that.
+
+## Adapter container pattern
+
+For the ambassador container pattern, we said that it hides outside services' complexity and
+provides a unified interface to the main container. The adapter container pattern does the opposite.
+It provides a unified interface to the external services.
+
+![Figure 40. Adapter Pattern](https://i.gyazo.com/f7e07a3604e09232ede74094ae091053.png)
+
+_Figure 40. Adapter Pattern_
+
+Using the adapter pattern, you use common interfaces across multiple containers. An excellent
+example of this pattern are adapters that ensure all containers have the same monitoring interface.
+For example, adapter for exposing the application or container metrics on **/metrics** and port **9090**.
+
+Your application might write the logs and metrics to a shared volume, and the adapter reads the
+data and serves it on a common endpoint and port. Using this approach, you can add the adapter
+container to each Pod to expose the metrics.
+
+Another use of this pattern is for logging. The idea is similar as the metrics - your applications can
+use an internal logging format. Simultaneously, the adapter takes that format, cleans it up, adds
+additional information, and then serves it to the centralized log aggregator.
+
+## Lifecycle Hooks
+
+The concept of hooks is well-known in the tech world. Events usually trigger hooks, and they allow
+developers to react to those events and run some custom code. Let’s take a simple user interface
+with a button and a text box. There might be multiple events that developers might be interested in
+handling (i.e., running some code whenever the event happens). One of these events could be the
+**onClick** event. You could write an onClick handler that gets called whenever a user clicks a button.
+
+Another popular example of hooks is webhooks. For example, your e-commerce website can define
+webhooks that can send you a JSON payload with the purchase information to a URL you specified
+whenever a sale occurs. You write a handler (in this case, it could be a serverless function) and set
+your serverless function as a handler for an event. This allows you to loosely couple the
+functionality and handle events that happen on a different system.
+
+![Figure 41. Simple Webhook](https://i.gyazo.com/092d8e6dde60e95c34e423c3ea4e0846.jpg)
+
+_Figure 41. Simple Webhook_
+
+Similarly, Kubernetes provides so-called __container hooks__. The container hooks allow you to react
+to container lifecycle events. There are two hooks you can use, the **PostStart** and **PreStop**.
+
+Kubernetes executes the **PostStart** hook as soon as the container is created. However, there’s no
+guarantee that the hook runs __before__ the containers' ENTRYPOINT command is called (they fire
+asynchronously). Note that if the hook handler hangs, it will prevent the container from reaching a
+running state.
+
+Kubernetes calls the **PreStop** hook before a container gets terminated. For the container to stop, the
+hook needs to complete executing. If the code in the handler hangs, your Pod will remain in the
+Terminating state until it gets killed.
+
+If either of the hook handlers fails, the container will get killed. If you decide on using these hooks,
+try to make your code as lightweight as possible, so your containers can start/stop quickly.
+
+As for the handlers, you can use a command that gets executed inside the container (e.g. **myscript.sh**) or send an HTTP request to a specific endpoint on the container (e.g. /**shutdown**).
+
+The most common scenarios you’d use the hooks for are performing some cleanup or saving the
+state before the container is terminated (PreStop) or configure application startup once the
+container starts (PostStart).
+
+We’ve talked about init containers, and there are differences between the two:
+
+- Init containers have their image while lifecycle hooks are executed inside the parent containers
+- Init containers are defined at the Pod level, while lifecycle hooks are defined per each container
+- Init containers are guaranteed to execute before the application containers start, while the
+PreStart hook might not execute before the ENTRYPOINT is called
+
+![Figure 42. Lifecycle Hooks](https://i.gyazo.com/c18ec3008819e04aa54b96b76c1c875d.png)
+
+_Figure 42. Lifecycle Hooks_
+
+Let’s look at an example to see how these lifecycle handlers work.
