@@ -6712,3 +6712,371 @@ If you want to try out the PodSecurityPolicy using Minikube, you have to make su
 the **PodSecurityPolicy** admission controller and **pod-security-policy** addon enabled. Alternatively,
 you can use one of the cloud-managed clusters that have the PodSecurityPolicy enabled. Here’s the
 command you can use to start the Minikube cluster with:
+
+```
+minikube start --extra-config=apiserver.enable-admission-plugins=PodSecurityPolicy
+--addons=pod-security-policy
+```
+
+Once the cluster starts, you can run **kubectl get podsecuritypolicy** (or **psp**) to get the list of pod
+security policies defined in the cluster:
+
+```
+$ kubectl get podsecuritypolicy
+NAME        PRIV    CAPS    SELINUX     RUNASUSER     FSGROUP    SUPGROUP
+READONLYROOTFS    VOLUMES
+privileged  true    *       RunAsAny    RunAsAny      RunAsAny   RunAsAny
+false             *
+restricted  false   RunAsAny MustRunAsNonRoot MustRunAs MustRunAs
+false configMap,emptyDir,projected,secret,downwardAPI,persistentVolumeClaim
+```
+
+Installing the addon created a **privileged** and **restricted** PodSecurityPolicy. In addition to the
+policies, the addon created two ClusterRoles that grant the service account access to use these
+policies through the verb use. The two ClusterRoles are named **psp:privileged** and **psp:restricted**.
+
+Here’s how the privileged ClusterRole is defined:
+
+```
+$ kubectl describe clusterrole psp:privileged
+Name: psp:privileged
+Labels: addonmanager.kubernetes.io/mode=EnsureExists
+Annotations: <none>
+PolicyRule:
+  Resources Non-Resource URLs Resource Names Verbs
+  --------- ----------------- -------------- -----
+  podsecuritypolicies.policy [] [privileged] [use]
+```
+
+The last resource that the addon created is the ClusterRoleBinding called **default:restricted**. This
+binding allows the **system:serviceaccounts** group access to the **psp-restricted** ClusterRole.
+
+```
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: psp-restricted
+subjects:
+- kind: Group
+  name: system:serviceaccounts
+  namespace: kube-system
+roleRef:
+  kind: ClusterRole
+  name: psp-restricted
+  apiGroup: rbac.authorization.k8s.io
+```
+
+Let’s create a Pod and see which policy gets applied to the Pod:
+
+_ch8/just-a-pod.yaml_
+```
+apiVersion: v1
+kind: Pod
+metadata:
+  name: just-a-pod
+spec:
+  containers:
+    - name: test
+      image: busybox
+      command: ["sh", "-c", "sleep 1h"]
+```
+
+Save the above YAML to **just-a-pod.yaml** and create the Pod using **kubectl apply -f just-a-pod.yaml**.
+When the Pod starts, you can use the **-o yaml** to get the YAML and look for the **kubernetes.io/psp**
+annotation:
+
+```
+$ kubectl get po
+NAME READY STATUS RESTARTS
+AGE
+just-a-pod 1/1 Running 0
+16s
+
+$ kubectl get po just-a-pod -o yaml | grep kubernetes.io/psp
+  kubernetes.io/psp: privileged
+```
+
+Kubernetes assigned the **privileged** pod security policy. Let’s do another test, but this time we will
+create a Deployment instead of a Pod:
+
+_ch8/just-a-deployment.yaml_
+```
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: just-a-deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: test
+  template:
+    metadata:
+      labels:
+        app: test
+    spec:
+      containers:
+        - name: test
+          image: busybox
+          command: ["sh", "-c", "sleep 1h"]
+```
+
+Save the above YAML to **just-a-deployment.yaml** and create the Deployment using **kubectl apply -f just-a-deployment.yaml**.
+
+If you list the Pods, you will notice that the Pod is not created and the status is set to
+**CreateContainerConfigError**:
+
+```
+$ kubectl get po
+NAME                                READY     STATUS      RESTARTS
+AGE
+just-a-deployment-7fd6bd7964-pdhb8  0/1       CreateContainerConfigError 0
+50s
+just-a-pod                          1/1       Running     0
+5m21s
+```
+
+If you look at the errors in the events list, you will see a more detailed error:
+
+```
+$ kubectl get event | grep Error
+9s Warning Failed pod/just-a-deployment-7fd6bd7964-pdhb8
+Error: container has runAsNonRoot and image will run as root
+```
+
+This error tells us that we need to provide the **runAsUser** setting in the security context. Why is that?
+The Pod template in the Deployment is identical to the Pod we created earlier.
+
+When we created the Pod directly using **kubectl**, Kubernetes used our user credentials. Since you’re
+the one who set up the cluster, you have cluster-admin privileges. When we created the
+Deployment, it was the Deployment and ReplicaSet controllers who created the Pods. In this case,
+Kubernetes used the ReplicaSet controllers' service account to create the Pods.
+
+Let’s check the policy that Kubernetes applied to the failing Pod:
+
+```
+$ kubectl get po just-a-deployment-7fd6bd7964-pdhb8 -o yaml | grep kubernetes.io/psp
+  kubernetes.io/psp: restricted
+```
+
+Because we used a different service account, Kubernetes applied the **restricted** policy to the Pod.
+Per restricted policy we must define the **runAsNonRoot** setting and a couple of other settings:
+
+```
+allowPrivilegeEscalation: false
+  fsGroup:
+  ranges:
+  - max: 65535
+  min: 1
+  rule: MustRunAs
+  requiredDropCapabilities:
+  - ALL
+  runAsUser:
+  rule: MustRunAsNonRoot
+  seLinux:
+  rule: RunAsAny
+  supplementalGroups:
+  ranges:
+  - max: 65535
+  min: 1
+  rule: MustRunAs
+```
+
+The **MustRunAs** rule means that we __must__ specify a value for those settings. Otherwise the Pod won’t
+run. Let’s update the Deployment and include these settings.
+
+
+_ch8/secure-deployment.yaml_
+```
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: just-a-deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: test
+  template:
+    metadata:
+      labels:
+        app: test
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 3000
+        fsGroup: 2000
+      containers:
+        - name: test
+          image: busybox
+          command: ["sh", "-c", "sleep 1h"]
+```
+
+Save the above YAML to **secure-deployment.yaml** and create the Deployment using **kubectl apply -f secure-deployment.yaml**.
+
+If you list the Pod this time, you will notice the Pod is running:
+
+```
+$ kubectl get po
+NAME                                READY     STATUS    RESTARTS    AGE
+just-a-deployment-7d996d5849-ph8hb  1/1       Running   0           3s
+```
+
+## Network Policies
+
+Using the NetworkPolicy resource, you can control the traffic flow for your applications in the
+cluster, at the IP address level or port level (OSI layer 3 or 4).
+
+__NOTE__:
+
+> Open Systems Interconnection model (OSI model) is a conceptual model that
+characterises and standardizes the communication functions, regardless of the
+underlying technology. For more information, see **OCI model**.
+
+With the NetworkPolicy you can define how your Pod can communicate with various network
+entities over the cluster. There are three parts to defining the NetworkPolicy:
+
+1. Select the Pods the policy applies to. You can do that using labels. For example, using app=hello
+applies the policy to all Pods with that label.
+
+2. Decide if the policy applies for incoming (ingress) traffic, outgoing (egress) traffic, or both.
+3. Define the ingress or egress rules by specifying IP blocks, ports, Pod selectors, or namespace
+selectors.
+
+Here is a sample NetworkPolicy:
+
+```
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: my-network-policy
+  namespace: default
+spec:
+  podSelector:
+  matchLabels:
+  app: hello
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+  - ipBlock:
+  cidr: 172.17.0.0/16
+  except:
+  - 172.17.1.0/24
+  - namespaceSelector:
+  matchLabels:
+  owner: ricky
+  - podSelector:
+  matchLabels:
+  version: v2
+  ports:
+  - protocol: TCP
+  port: 8080
+  egress:
+  - to:
+  - ipBlock:
+  cidr: 10.0.0.0/24
+  ports:
+  - protocol: TCP
+  port: 500
+```
+
+Let’s break down the above YAML. The podSelector tells us that the policy applies to all Pods in the
+default namespace that have the app: hello label set. We are defining policy for both ingress and
+egress traffic.
+The calls to the Pods policy applies to can be made from any IP within the CIDR block 172.17.0.0/16
+(that’s 65536 IP addresses, from 172.17.0.0 to 172.17.255.255), except for Pods whose IP falls within
+the CIDR block 172.17.1.0/24 (256 IP addresses, from 172.17.1.0 to 172.17.1.255) to the port 8080.
+Additionally, the calls to the Pods policy applies to can be coming from any Pod in the namespace(s)
+176
+with the label owner: ricky and any Pod from the default namespace, labeled version: v2.
+Figure 44. Ingress Network Policy
+The egress policy specifies that Pods with the label app: hello in the default namespace can make
+calls to any IP within 10.0.0.0/24 (256 IP addresses, from 10.0.0.0, 10.0.0.255), but only to the port
+5000.
+177
+Figure 45. Egress Network Policy
+The Pod and namespace selectors support and and or semantics. Let’s consider the following
+snippet:
+  ...
+  ingress:
+  - from:
+  - namespaceSelector:
+  matchLabels:
+  user: ricky
+  podSelector:
+  matchLabels:
+  app: website
+  ...
+The above snippet with a single element in the from array, includes all Pods with labels app: website
+from the namespace labeled user: ricky. This is the equivalent of and operator.
+If you change the podSelector to be a separate element in the from array by adding -, you are using
+the or operator.
+178
+  ...
+  ingress:
+  - from:
+  - namespaceSelector:
+  matchLabels:
+  user: ricky
+  - podSelector:
+  matchLabels:
+  app: website
+  ...
+The above snippet includes all Pods labeled app: website or all Pods from the namespace with the
+label user: ricky.
+Installing Cilium
+Network policies are implemented (and rules enforced) through network plugins. If you don’t
+install a network plugin, the policies won’t have any effect.
+I will use the Cilium plugin and install it on top of Minikube. You could also use a different plugin,
+such as Calico.
+If you already have Minikube running, you will have to stop and delete the cluster (or create a
+separate one). You will have to start Minikube with the cni flag for the Cilium to work correctly:
+$ minikube start --network-plugin=cni
+Once Minikube starts, you can install Cilium.
+$ kubectl create -f
+https://raw.githubusercontent.com/cilium/cilium/1.8.3/install/kubernetes/quickinstall.yaml
+all/kubernetes/quick-install.yaml
+serviceaccount/cilium created
+serviceaccount/cilium-operator created
+configmap/cilium-config created
+clusterrole.rbac.authorization.k8s.io/cilium created
+clusterrole.rbac.authorization.k8s.io/cilium-operator created
+clusterrolebinding.rbac.authorization.k8s.io/cilium created
+clusterrolebinding.rbac.authorization.k8s.io/cilium-operator created
+daemonset.apps/cilium created
+deployment.apps/cilium-operator created
+Cilium is installed in kube-system namespace, so you can run kubectl get po -n kube-system and
+wait until the Cilium Pods are up and running.
+Let’s look at an example that demonstrates how to disable egress traffic from the Pods.
+179
+ch8/no-egress-pod.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: no-egress-pod
+  labels:
+  app.kubernetes.io/name: hello
+spec:
+  containers:
+  - name: container
+  image: radial/busyboxplus:curl
+  command: ["sh", "-c", "sleep 3600"]
+Save the above YAML to no-egress-pod.yaml and create the Pod using kubectl apply -f no-egresspod.yaml.
+Once the Pod is running, let’s try calling google.com using curl:
+$ kubectl exec -it no-egress-pod -- curl -I -L google.com
+HTTP/1.1 301 Moved Permanently
+Location: http://www.google.com/
+Content-Type: text/html; charset=UTF-8
+Date: Thu, 24 Sep 2020 16:30:59 GMT
+Expires: Sat, 24 Oct 2020 16:30:59 GMT
+Cache-Control: public, max-age=2592000
+Server: gws
+Content-Length: 219
+X-XSS-Protection: 0
+X-Frame-Options: SAMEORIGIN
+HTTP/1.1 200 OK
+...
+The call completes successfully. Let’s define a network policy that will prevent egress for Pods with
+the label app.kubernetes.io/name: hello:
