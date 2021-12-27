@@ -5589,3 +5589,630 @@ What you could do in this case is to mount the authorization token secret inside
 then run curl as part of the command probe.
 
 Here’s how you can provide a command to execute to the liveness probe:
+
+```
+...
+livenessProbe:
+  exec:
+  command:
+  - curl
+  - --fail
+  - -u $(USER)
+  - -p $(PASSWORD)
+  - localhost:3000/healthz
+initialDelaySeconds: 30
+periodSeconds: 1
+...
+```
+
+We are using **localhost** because the command will run inside the same container your application
+is running in.
+
+### **TCP Probe**
+
+With the TCP probe, Kubernetes tries to establish a TCP connection on the specified port. The
+configuration is almost identical to the HTTP probe. Instead of using the httpGet field, you use
+**tcpSocket** field, like this:
+
+```
+...
+livenessProbe:
+  tcpSocket:
+  port: 3000
+  initialDelaySeconds: 10
+  periodSeconds: 5
+```
+
+The above **tcpSocket** probe will try to open a socket on port **3000**, 15 seconds after the container
+starts. An excellent example of the TCP probe would be a gRPC service.
+
+## Application Startup probe
+
+When you’re dealing with applications that can take longer to start up, it might be tricky to set up a
+proper liveness check that’s going to work both for the startup of the container and during the
+lifetime of the container. For that purpose, you can use the startup probe that uses the probe
+method (HTTP, TCP, or command), but with a higher failure threshold. The higher threshold is for
+cases where the application takes a long time to start.
+
+```
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: 3000
+  periodSeconds: 4
+startupProbe:
+  httpGet:
+    path: /healthz
+    port: 3000
+  failureThreshold: 30
+  periodSeconds: 4
+```
+
+Based on the startup probe’s above settings, the container will have a maximum of 2 minutes (30
+from the failure threshold setting multiplied by 4 seconds from the periodSeconds field) to finish the
+startup. The formula for calculating the maximum time is:
+
+```
+initialDelaySeconds + failureThreshold * periodSeconds
+```
+
+So if the probe is failing for the first 2 minutes, Kubernetes won’t restart it yet. Once 2 minutes pass,
+the startup probe will be considered as failed.
+
+If the application starts up within the 2 minutes, the liveness probe will take over and ensure the
+container stays alive.
+
+## Application Readiness probe
+
+You can use the __readiness probe__ to determine when your application is ready to start receiving
+traffic. In some cases, applications might take a while to startup. That could be because they depend
+on external services for the startup or loading a more considerable amount of data that takes time.
+During this time, you don’t want to restart the container or send any requests to the container
+either.
+
+If the readiness probe determines that the container is not ready yet, Kubernetes will mark the Pod
+as unhealthy and won’t send any traffic. It will not restart the container; rather, it will invoke the
+probe based on the settings to determine when it’s ready to receive traffic. Once the probe
+succeeds, the Pod is marked as healthy and can start receiving requests.
+
+To demonstrate the readiness probe, we will use the **/readyz** endpoint. This endpoint will return
+HTTP 500 for the first 10 seconds (simulate the container doing some work). In those first 10
+seconds, the container will be marked as unhealthy and won’t receive any traffic.
+
+The configuration for the readiness probe looks similar to the liveness probe. You only need to
+replace the livenessProbe key with readinessProbe key. Other configuration settings are also the
+same.
+
+_ch7/readiness.yaml_
+
+```
+apiVersion: v1
+kind: Pod
+metadata:
+  name: readiness
+  labels:
+    app.kubernetes.io/name: readiness
+spec:
+  containers:
+    - name: web
+      image: startkubernetes/app-health:0.1.0
+      ports:
+        - containerPort: 3000
+      readinessProbe:
+        httpGet:
+          path: /readyz
+          port: 3000
+        initialDelaySeconds: 3
+        periodSeconds: 1
+```
+
+Save the above YAML in **readiness.yaml** and create the Pod with **kubectl apply -f readiness.yaml**.
+If you describe the Pod, you will notice that under the **Ready** and **ContainersReady** values under the
+**Conditions** section:
+
+```
+$ kubectl describe po readiness
+...
+Conditions:
+  Type Status
+  Initialized True
+  Ready False
+  ContainersReady False
+  PodScheduled True
+...
+```
+
+If you re-run the describe command after 10 seconds, both values for **Ready** and **ContainersReady** will
+change to **True**, indicating the Pod and containers are ready:
+
+```
+$ kubectl describe po readiness
+...
+Conditions:
+  Type Status
+  Initialized True
+  Ready True
+  ContainersReady True
+  PodScheduled True
+...
+```
+
+Similarly, if you look at the logs when the Pod starts, you will notice it is returning HTTP 500, and
+after 10 seconds, it starts returning HTTP 200:
+
+```
+$ kubectl logs readiness
+
+> app-health@0.1.0 start /app
+> node server.js
+
+appHealth running on port 3000.
+{"host":"172.17.0.2:3000","user-agent":"kube-probe/1.18","accept-encoding":"gzip"
+,"connection":"close"}
+GET /readyz 500 7.179 ms - 21
+{"host":"172.17.0.2:3000","user-agent":"kube-probe/1.18","accept-encoding":"gzip"
+,"connection":"close"}
+...
+GET /readyz 200 0.279 ms - 2
+{"host":"172.17.0.2:3000","user-agent":"kube-probe/1.18","accept-encoding":"gzip"
+,"connection":"close"}
+GET /readyz 200 0.862 ms - 2
+...
+```
+
+You can use the readiness probe together with the liveness probe to health and ready-check the
+same containers. Using both probes, you can ensure Kubernetes restarts the failed containers when
+they are unheathy and allows them to receive the requests only when they are ready to receive
+traffic.
+
+
+# Security in Kubernetes
+
+## What are service accounts?
+
+To access the Kubernetes API server, you need an authentication token. The processes running
+inside your containers use a service account to authenticate with the Kubernetes API server. Just like a user account represents a human, a service account represents and provides an identity to
+your Pods.
+
+Each Pod you create has a service account assigned to it. Even if you don’t explicitly provide the
+service account name, Kubernetes sets the default service account to your Pods. This default service account (called **default**) is in every namespace in Kubernetes, which means that the account is bound to the namespace it lives in. You can try creating a new namespace and listing the service accounts (e.g. **kubectl get serviceaccount**), and you’ll see there’s a service account called **default**. A
+Pod can only use one service account, and they both need to be in the same namespace. However,
+multiple Pods can share the same service account.
+
+I will be using Minikube in this section. Let’s start by creating a Pod to see where the service
+account is specified:
+
+```
+$ kubectl run simple-pod --image=nginx
+```
+
+You can use **-o yaml** to get the YAML representation of the Pod, like this: **kubectl get po simple-pod -o yaml**. If you look through the output, you will notice the following line:
+
+```
+serviceAccountName: default
+```
+
+Even though we haven’t explicitly set the service account name, Kubernetes assigned the default service account to the Pod.
+
+Let’s run **kubectl describe serviceaccount default or kubectl describe sa default** to see the details of the default service account:
+
+```
+$ kubectl describe sa default
+Name: default
+Namespace: default
+Labels: <none>
+Annotations: <none>
+Image pull secrets: <none>
+Mountable secrets: default-token-qjdzv
+Tokens: default-token-qjdzv
+Events: <none>
+```
+
+Like any other resource, the service account has the name, namespace, and labels and annotations. Additionally, it has the **Image pull secrets**, **Mountable secrets**, and **Tokens** sections. If you defined
+
+image pull secrets (these are used by Pods to pull the images from private registries), Kubernetes will automatically added them to all Pods that are using this service account. The mountable secrets field is specifying the secrets that can be mounted by the Pods using this service account. Lastly, the
+tokens fields list all authentication tokens in the service account. Kubernetes automatically mounts the first token inside the container.
+
+Here’s how the YAML representation of the service account looks like, if you run **kubectl get sa default -o yaml**:
+
+```
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  creationTimestamp: "2020-09-03T22:09:47Z"
+  name: default
+  namespace: default
+  resourceVersion: "320"
+  selfLink: /api/v1/namespaces/default/serviceaccounts/default
+  uid: 7395b383-6f90-4fef-946c-87bcc3211891
+secrets:
+- name: default-token-qjdzv
+```
+
+The mountable secret from the account (the **default-token-qjdzv** above) gets mounted
+automatically in each Pod under **/var/run/secrets/kubernetes.io/serviceaccount**. The Secret stores these three values:
+
+- the authentication token (mounted as **token** file)
+- namespace name (mounted as **namespace** file)
+- public certificate authority of the API server (mounted as **ca.crt** file)
+
+Kubernetes can use different authentication mechanisms or plugins - client certificates, bearer
+tokens, authenticating proxy, or HTTP basic auth - to authenticate API requests. Whenever the API
+server receives a request, the request goes through all configured plugins, and the plugins try to
+determine the requests' sender. The plugins try to extract the caller’s identity from the request, and
+the first plugin that’s able to extract that information will send it to the API server. At this point, the
+request will continue to the authorization phase.
+
+The identity consists of the following attributes:
+
+- Username (a string that identifies the user)
+- User ID (UID) (a string that identifies the user - more unique than the username)
+- Groups: a set of strings that indicats the groups user belongs (e.g., developers, system:admins,
+etc.)
+- Other extra fields
+
+The service account usernames use the following format:
+
+```
+system:serviceaccount:[namespace]:[service-account-name]
+```
+
+The API server uses this username to determine if the caller (the process inside the container,
+inside your Pod) can perform the desired action (for example, getting the Pods list from the API
+server).
+
+Each service account can belong to one or more groups. These groups are used to grant permissions
+to multiple users at the same time. For example, a group called **administrators** grants
+administrative privileges to all accounts of that group. These groups are just simple, unique strings -
+**admins**, **developers**, etc.
+
+Let’s go back to our **simple-pod** and invoke the Kubernetes API using the service account token.
+First, we will get a shell inside the container:
+
+```
+$ kubectl exec -it simple-pod -- /bin/bash
+root@simple-pod:/#
+```
+
+We will store the auth token in the TOKEN variable, so we can use it when invoking the API:
+
+```
+$ TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+```
+
+If you’re curious about the encoded information in the token, you can head to https://jwt.io and
+decode your token to look at the payload. Here’s how the payload for my token looks like:
+
+```
+{
+  "iss": "kubernetes/serviceaccount",
+  "kubernetes.io/serviceaccount/namespace": "default",
+  "kubernetes.io/serviceaccount/secret.name": "default-token-qjdzv",
+  "kubernetes.io/serviceaccount/service-account.name": "default",
+  "kubernetes.io/serviceaccount/service-account.uid": "7395b383-6f90-4fef-946c-87bcc3211891",
+  "sub": "system:serviceaccount:default:default"
+}
+```
+
+We will use the **TOKEN** as the bearer token and invoke the Kubernetes API. The Kubernetes API is
+exposed through the Service called **kubernetes** in the default namespace.
+
+Here’s how we can try and invoke the API from within the container:
+
+```
+root@simple-pod:#/ curl -sSk -H "Authorization: Bearer $TOKEN"
+https://kubernetes.default:443/api
+{
+  "kind": "APIVersions",
+  "versions": [
+  "v1"
+  ],
+  "serverAddressByClientCIDRs": [
+    {
+      "clientCIDR": "0.0.0.0/0",
+      "serverAddress": "192.168.64.9:8443"
+    }
+  ]
+}
+```
+
+If we tried to access the namespaces or Pods, we would get a "403 Forbidden" response back. That’s because the default service account doesn’t have any permissions - Kubernetes treats the default service account as an unauthenticated user.
+
+Here’s the response we get back if we try to get the information about the simple-pod Pod:
+
+```
+root@simple-pod:/# curl -sSk -H "Authorization: Bearer $TOKEN"
+https://kubernetes.default:443/api/v1/namespaces/default/pods/simple-pod
+{
+  "kind": "Status",
+  "apiVersion": "v1",
+  "metadata": {
+
+  },
+  "status": "Failure",
+  "message": "pods \"simple-pod\" is forbidden: User
+\"system:serviceaccount:default:default\" cannot get resource \"pods\" in API group
+\"\" in the namespace \"default\"",
+  "reason": "Forbidden",
+  "details": {
+  "name": "simple-pod",
+  "kind": "pods"
+  },
+  "code": 403
+}
+```
+
+The detailed message says that the user **system:serviceaccount:default:default** (note the first
+**default** is the namespace name, and the second one is the service account name) cannot get the
+Pods from the **default** namespace. What we could do is add the default service account to a group
+that has more permissions. However, that would be a horrible idea, because if you remember, the
+**default** service account gets automatically assigned to each Pod if the Pod doesn’t specify its service
+account. A much better practice is to create a new service account and explicitly set it for the Pod.
+
+You can exit the container by typing exit and then deleting the Pod by running kubectl delete po simple-pod.
+
+## Using Role-Based Access Control (RBAC)
+
+Kubernetes manages the authorization (i.e., regulating access to resources based on roles) through
+the role based access control or RBAC for short.
+
+Using RBAC, you can dynamically configure policies and control access to the Kubernetes resources.
+There are four Kubernetes resources related to RBAC - Role (and ClusterRole) and RoleBinding (and
+ClusterRoleBinding).
+
+### **Roles**
+
+The Role resource contains the rules that represent a set of permissions. The Role is defined on the
+namespace level, and rules only apply within that namespace. The second resource is the
+ClusterRole resource, and this resource can be used to apply the permissions cluster-wide (across
+all namespaces).
+
+The other couple of use cases for ClusterRole are if you are defining rules for cluster-scoped
+resources. An example of a cluster-scope resource is cluster nodes. You could apply rules for
+namespaced resources across all namespaces, such as all Services or all Pods in the cluster.
+Similarly, you would use a ClusterRole if you are defining permissions for non-resource endpoints
+(e.g., **/healthz**).
+
+If we continue with the previous example where we tried to list the Pods from within the container,
+here’s how we could define a Role called **pod-reader** that grants read access to Pods:
+
+```
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: default
+  name: pod-reader
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "watch", "list"]
+```
+
+The **apiGroups** indicates which core API group the role applies to. The empty value means that the rules apply to the core API group. You can get the list of all API groups by running **kubectl api-resources -o wide**. The **APIGROUP** column shows the name, and the **VERBS** column will show you the
+supported verbs for a particular API group. For example, the **deployments** fall under the **apps** API
+group, and the following verbs are supported: **[create delete deletecollection get list patch update watch]**. Since Pods are part of the core API, we don’t have to specify an **apiGroup** for them.
+
+The **resources** field holds the list of resources the rules apply to. In the above case, we are setting it
+to pods. If we wanted to apply the rules to any other resource from the core API group, we could
+add it to the list. For example, to apply the rules to Services and ConfigMaps, the **resources** field
+value would be :`["pods", "services", "configmaps"]`.
+
+The array in the **verbs** field maps to the HTTP verbs used when making the API’s request. The table
+below shows how the HTTP verbs map to the verbs you can use in the Role (or ClusterRole)
+resource.
+
+_Table 6. HTTP Verbs_
+
+| HTTP verb | Verb in Role |
+|-----------|--------------|
+| POST | create |
+| GET, HEAD | get, list, watch |
+| PUT | update |
+| PATCH | patch |
+| DELETE | delete, deletecollection |
+
+There’s also the **resourceNames** field that you can set under the rules if you want to specify the exact
+resource the rules should apply to. The example below shows how you could create a rule that only
+applies to Deployment called **my-deployment**:
+
+```
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: default
+  name: deployment-role
+rules:
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  resourceName: ["my-deployment"]
+  verbs: ["get"]
+```
+
+Once you have created the roles, you have to use one of the binding resources to grant the
+permissions (from the role) to the users.
+
+### Bindings
+
+You use the RoleBinding and ClusterRoleBinding resources to bind the permissions from the Role or
+ClusterRole resource to the users. The users, in this case, could be groups or service account. Like
+with the Role and ClusterRole before, the RoleBinding grants the permissions within a specific
+namespace, whereas the ClusterRoleBinding grants the permissions cluster-wide.
+
+Here’s how we could create a RoleBinding that binds the **pod-reader** Role to a service account called
+**pod-reader-sa**:
+
+```
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: read-pods
+  namespace: default
+subjects:
+- kind: ServiceAccount
+  name: pod-reader-sa
+roleRef:
+  kind: Role
+  name: pod-reader
+  apiGroup: rbac.authorization.k8s.io
+```
+
+Under **subjects**, you can define multiple subjects - these can either be service accounts, users, or
+groups. The binding assigns these subjects the role that’s referenced under the **roleRef** field.
+
+Now that we have a basic understanding of how RBAC and service accounts work together let’s
+create a service account called **pod-reader-sa** service account, a Role, and a RoleBinding that grants
+the permission to read the Pods. We will then create the same Pod as we did at the beginning of this
+chapter and assign the **pod-reader-sa** service account to it.
+
+First, let’s create the service account:
+
+_ch8/pod-reader-sa.yaml_
+```
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pod-reader-sa
+```
+
+Save the above to **pod-reader.sa.yaml** and create the service account using **kubectl apply -f pod-reader-sa.yaml**.
+
+_ch8/pod-reader-role.yaml_
+
+```
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: default
+  name: pod-reader
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+```
+
+__NOTE__:
+
+> Another way to create Roles is by using **kubectl** directly. For example **kubectl create
+role pod-reader --verb=list --resource=pods -n default**.
+
+Next, we create the Role that only allows listing the Pods. This Role will prevent us from retrieving
+the Pod details, for example (that’s the **get** verb). Save the above to **pod-reader-role.yaml** and create
+it with **kubectl apply -f pod-reader-role.yaml**.
+
+To assign the Role to the service account we need to create the RoleBinding:
+
+_ch8/pod-reader-role-binding.yaml_
+```
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: read-pods
+  namespace: default
+subjects:
+  - kind: ServiceAccount
+    name: pod-reader-sa
+    namespace: default
+roleRef:
+  kind: Role
+  name: pod-reader
+  apiGroup: rbac.authorization.k8s.io
+```
+
+__NOTE__:
+
+> To bind a Role to a subject with Kubernetes CLI, use **kubectl create rolebinding
+read-pods --role=pod-reader --serviceaccount=default:pod-reader-sa -n default**
+
+You can describe the role binding, and it should look similar to this:
+
+```
+$ kubectl describe rolebinding read-pods
+Name: read-pods
+Labels: <none>
+Annotations: <none>
+Role:
+  Kind: Role
+  Name: pod-reader
+Subjects:
+  Kind Name Namespace
+  ---- ---- ---------
+  ServiceAccount pod-reader-sa default
+```
+
+The figure below shows how the connection between the service account, Role, and the
+RoleBinding.
+
+![Figure 43. Service Account, Role, and RoleBinding](https://i.gyazo.com/13ef5340d623b8872a453480e0558aef.png)
+
+_Figure 43. Service Account, Role, and RoleBinding_
+
+Finally, we can create the Pod with the **serviceAccountName** field set to **pod-reader-sa**.
+
+_ch8/pod-with-sa.yaml_
+```
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    run: simple-pod
+  name: simple-pod
+spec:
+  serviceAccountName: pod-reader-sa
+  containers:
+    - image: nginx
+      name: simple-pod
+```
+Save the above YAML to **pod-with-sa.yaml** and create the Pod with **kubectl apply -f pod-with-sa.yaml**.
+
+Let’s get the shell inside the container and then try send a request to the Kubernetes API:
+
+```
+$ kubectl exec -it simple-pod -- /bin/bash
+root@simple-pod:/# TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+root@simple-pod:/# curl -sSk -H "Authorization: Bearer $TOKEN"
+https://kubernetes.default:443/api/v1/namespaces/default/pods
+{
+  "kind": "PodList",
+  "apiVersion": "v1",
+  "metadata": {
+  "selfLink": "/api/v1/namespaces/default/pods",
+  "resourceVersion": "7768"
+  },
+  "items": [
+  {
+  "metadata": {
+  "name": "simple-pod",
+  "namespace": "default",
+  "selfLink": "/api/v1/namespaces/default/pods/simple-pod",
+...
+```
+
+This time the request worked! If you try to get the details about the **simple-pod** for example, the
+request fails as we don’t have the **get** verb in the role. Similarly, if you try to list any other
+resources, the request will fail as well.
+
+## Security contexts
+
+The way to apply security-related configuration is through the **securityContext** field. The objects
+that describe the security context are called PodSecurityContext and SecurityContext. You can set
+the security context at the Pod level or the container level. If you set the same values at both levels,
+the container **securityContext** value will take precedence.
+
+### **Privileged containers**
+
+If you set the **privileged** setting to **true**, your container will run in a privileged mode, which nearly
+equals **root** on the container host. The default value is false. You would use this if your container
+needs to manipulate the network stack or access hardware devices on the host. In general, you
+shouldn’t be running your container in the privileged mode at all.
+
+```
+...
+securityContext:
+  privileged: true
+....
+```
+
+### **User (UID) and group ID (GID)**
+
+Using the **runAsUser** and **runAsGroup** fields, you can specify the UID or GID the containers' processes
+will use to execute. Let’s consider the following snippet:
