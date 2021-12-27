@@ -6216,3 +6216,499 @@ securityContext:
 
 Using the **runAsUser** and **runAsGroup** fields, you can specify the UID or GID the containers' processes
 will use to execute. Let’s consider the following snippet:
+
+```
+....
+spec:
+  securityContext:
+    runAsUser: 1000
+    runAsGroup: 3000
+    fsGroup: 2000
+...
+```
+
+All processes in the container that uses the above security context will run as user ID 1000. The
+group ID for all processes in the containers is 3000. With **fsGroup** we are specifying that all
+processes will also be apart of the supplementary group with ID 2000.
+
+Let’s take a look at an example:
+
+_ch8/pod-ids.yaml_
+
+```
+apiVersion: v1
+kind: Pod
+metadata:
+  name: hello-pod
+  labels:
+    app.kubernetes.io/name: hello
+spec:
+  securityContext:
+    runAsUser: 1000
+    runAsGroup: 3000
+    fsGroup: 2000
+  containers:
+    - name: hello-container
+      image: busybox
+      command: ["sh", "-c", "sleep 3600"]
+```
+Save the above YAML to **pod-ids.yaml** and create the Pod with **kubectl apply -f pod-ids.yaml**. Let’s
+get the terminal inside the Pod and run ps to look at the list of running processes:
+
+```
+$ kubectl exec -it hello-pod -- /bin/sh
+/ $ ps
+PID USER TIME COMMAND
+  1 1000 0:00 sleep 3600
+  17 1000 0:00 /bin/sh
+  27 1000 0:00 ps
+/ $
+```
+
+Notice the ID in the **USER** column is 1000, just like we set it in the security context.
+
+```
+/ $ id
+uid=1000 gid=3000 groups=2000
+/ $
+```
+
+Similarly, if you run the id command, you will notice the uid set to 1000, the gid set to 3000, and
+supplemental group (groups) to 2000.
+
+### **Linux capabilities**
+
+Using the **capabilities** field, you can set a list of Linux capabilities you want to add or drop from
+the containers. Even though containers are running in isolated namespaces they don’t have
+permissions to everything. Using these capabilities, you can fine-tune the permissions you want to
+grant to the containers.
+
+For example, if you’d want your containers to use privileged ports (any port number smaller than
+1024), you could use the **NET_BIND_SERVICE** capability. To add this capability to the container, you can
+specify it under the **capabilities** field under the container:
+
+```
+...
+  securityContext:
+    capabilities:
+      add:
+        - NET_BIND_SERVICE
+```
+
+Let’s try setting this to a sample Pod:
+
+_ch8/add-cap-pod.yaml_
+```
+apiVersion: v1
+kind: Pod
+metadata:
+  name: hello-pod
+  labels:
+    app.kubernetes.io/name: hello
+spec:
+  containers:
+    - name: hello-container
+      image: debian
+      command: ["sh", "-c", "sleep 3600"]
+      securityContext:
+        capabilities:
+          add:
+            - NET_BIND_SERVICE
+```
+__NOTE__:
+
+> We have updated the image name to **debian**, because it already has the **capsh** binary
+installed.
+
+Once the container is up and running you can use the **capsh** command to look at the capabilities:
+
+```
+$ kubectl exec -it hello-pod -- capsh --print
+Current: =
+cap_chown,cap_dac_override,cap_fowner,cap_fsetid,cap_kill,cap_setgid,cap_setuid,cap_se
+tpcap,cap_net_bind_service,cap_net_raw,cap_sys_chroot,cap_mknod,cap_audit_write,cap_se
+tfcap+eip
+Bounding set
+=cap_chown,cap_dac_override,cap_fowner,cap_fsetid,cap_kill,cap_setgid,cap_setuid,cap_s
+etpcap,cap_net_bind_service,cap_net_raw,cap_sys_chroot,cap_mknod,cap_audit_write,cap_s
+etfcap
+Securebits: 00/0x0/1'b0
+ secure-noroot: no (unlocked)
+ secure-no-suid-fixup: no (unlocked)
+ secure-keep-caps: no (unlocked)
+uid=0(root)
+gid=0(root)
+groups=
+```
+
+You can find the **cap_net_bind_service** capability in the list. Also, notice all other capabilities that
+are available in the container by default. A good practice is to drop all capabilities first and then
+only add the capabilities your application need. To do that, you can use the **drop** field.
+
+Delete the previous Pod with **kubectl delete po hello-pod** and let’s create one that drops all
+capabilities:
+
+_ch8/drop-all-pod.yaml_
+```
+apiVersion: v1
+kind: Pod
+metadata:
+  name: hello-pod
+  labels:
+    app.kubernetes.io/name: hello
+spec:
+  containers:
+    - name: hello-container
+      image: debian
+      command: ["sh", "-c", "sleep 3600"]
+      securityContext:
+        capabilities:
+          drop:
+            - all
+```
+
+If you run **capsh** this time, you will notice that all capabilities have been dropped:
+
+```
+$ kubectl exec -it hello-pod -- capsh --print
+Current: =
+Bounding set =
+Securebits: 00/0x0/1'b0
+ secure-noroot: no (unlocked)
+ secure-no-suid-fixup: no (unlocked)
+ secure-keep-caps: no (unlocked)
+uid=0(root)
+gid=0(root)
+groups=
+```
+
+The above capabilites are a good starting point for all your containers. The next step would be to
+dig deeper into individual capabilities your application might need and grant them. You can find
+the full reference and explanation of [Linux capabilities here](https://man7.org/linux/man-pages/man7/capabilities.7.html).
+
+### **SELinux**
+
+Security-Enhanced Linux (SELinux) is a Linux kernel security module that allows you to have more
+control over who can access things in the system. SELinux is a labeling system, and every process,
+file, or a directory has a label. You can write policy rules that control access between labeled
+processes and labeled objects, and the OS kernel will enforce these rules. The detailed explanation
+of SELinux and how it works is out of scope for this book. Here are a couple of resources you can
+use to get more familiar with the SELinux:
+
+- Your visual how-to guide for SELinux policy enforcement [https://opensource.com/business/13/
+11/selinux-policy-guide] (article by Daniel Walsh)
+- Security-Enhanced Linux for mere mortals [https://www.youtube.com/watch?v=_WOKRaM-HI4]
+(talk by Thomas Cameron)
+
+To assign SELinux labels to a container, you can use the **seLinuxOptions** field in the **securitySection**.
+Note that you can apply the **seLinuxOptions** at both Pod and container level.
+
+```
+...
+securityContext:
+  seLinuxOptions:
+  level: "s0:c123,c456"
+```
+
+### **AppArmor**
+
+AppArmor is another Linux kernel security module. In allows you to confine applications to a
+limited set of resources and it’s used together with the traditional permissions (users and groups).
+You can create AppArmor profiles that restrict actions such as reading, writing, or executing
+specific files or limiting access to networks. Default AppArmor profiles limit access to **/proc** and
+/sys locations, and this gives you a way to isolate the containers from the node they are running on.
+
+Note that AppArmor is not available on all operating systems. Suppose you’re running your
+Kubernetes cluster on Ubuntu or SUSE Linux (or running Minikube with the KVM driver on those
+operating systems). In that case, the AppArmor is supported and enabled by default. To quickly
+check if the AppArmor is enabled, run the following command:
+
+```
+$ cat /sysmodule/apparmor/parameters/enabled
+Y
+```
+
+The AppArmor profiles are defined per-container through an annotation with the following format:
+```
+container.apparmor.security.beta.kubernetes.io/<container_name>: <profile_name>
+```
+
+Here’s an earlier example of a Pod but this time with the AppArmor profile selected for the
+container:
+
+```
+apiVersion: v1
+kind: Pod
+metadata:
+  name: hello-pod
+  labels:
+    app.kubernetes.io/name: hello
+  annotations:
+    container.apparmor.security.beta.kubernetes.io/hello-container: runtime/default
+spec:
+  containers:
+  - name: hello-container
+    image: busybox
+    command: ["sh", "-c", "echo Hello from my container! && sleep 3600"]
+```
+
+The above annotation applies the **runtime/default** AppArmor profile to the **hello-container**. If you
+don’t have AppArmor enabled on your cluster nodes, you can’t run any Pods with the AppArmor
+annotation. The Pods will have a **Blocked** status, like this:
+
+```
+$ kubectl get po
+NAME        READY     STATUS    RESTARTS    AGE
+hello-pod   0/1       Blocked   0           65s
+```
+
+If you get more details from the Pod using the **describe** command, you will notice the following
+message in the output:
+
+```
+...
+Annotations: container.apparmor.security.beta.kubernetes.io/hello-container:
+runtime/default
+Status:      Pending
+Reason:      AppArmor
+Message:     Cannot enforce AppArmor: AppArmor is not enabled on the host
+...
+```
+
+To check which AppArmor profiles operating systems loads on your cluster nodes, you can look in
+the **/sys/kernel/security/apparmor/profiles** file. To do that, you will have to SSH into your cluster
+nodes. Enabling SSH access to the nodes depends on the cloud provider your cluster is hosted in. If
+you’re running Linux or Minikube with KVM driver, you’re in luck because you can directly look at
+that **/sys/kernel/security/apparmor/profiles** folder.
+
+Here’s a sample output from one of the nodes on the cloud-managed cluster I used that shows all
+AppArmor profiles on the node:
+
+```
+$ sudo cat /sys/kernel/security/apparmor/profiles
+docker-default (enforce)
+/usr/lib/snapd/snap-confine (enforce)
+/usr/lib/snapd/snap-confine//mount-namespace-capture-helper (enforce)
+/usr/sbin/tcpdump (enforce)
+/usr/lib/connman/scripts/dhclient-script (enforce)
+/usr/lib/NetworkManager/nm-dhcp-helper (enforce)
+/usr/lib/NetworkManager/nm-dhcp-client.action (enforce)
+/sbin/dhclient (enforce)
+/usr/lib/lxd/lxd-bridge-proxy (enforce)
+/usr/bin/lxc-start (enforce)
+lxc-container-default-with-nesting (enforce)
+lxc-container-default-with-mounting (enforce)
+lxc-container-default-cgns (enforce)
+lxc-container-default (enforce)
+```
+
+Notice the word **enforce** in the parenthesis? AppArmor can run in two modes: **enforce** and **complain**.
+If the profile is loaded in enforcement mode, the policies in the profile will be enforced. However, if
+you load it in the **complain** mode, the policy will not be enforced. Instead policy violations will be
+reported (via syslog or auditd).
+
+Let’s create a sample policy and see how it looks like when it’s enforced on a container.
+
+_deny-all.profile_
+
+```
+#include <tunables/global>
+profile apparmor-example-deny-all flags=(attach_disconnected) {
+  #include <abstractions/base>
+  
+  file,
+  # Deny all file reads/writes.
+  deny /** rw,
+}
+```
+
+The sample policy called **apparmor-example-deny-all** from the listing above denies all reads and
+writes to files. To add the profile, you can use **apparmor_parser** command:
+
+```
+$ sudo apparmor_parser deny-all.profile
+```
+
+__NOTE__:
+
+> There won’t be any output from the command if the AppArmor profile is loaded
+correctly.
+
+If you look at all loaded profiles again, you’ll notice our profile in the list:
+
+```
+$ sudo cat /sys/kernel/security/apparmor/profiles
+apparmor-example-deny-all (enforce)
+....
+```
+
+Let’s see this AppArmor profile in action. We prefix the AppArmor profile name with **localhost** and
+set it the annotation:
+
+_ch8/pod-apparmor.yaml_
+```
+apiVersion: v1
+kind: Pod
+metadata:
+  name: hello-pod
+  labels:
+    app.kubernetes.io/name: hello
+  annotations:
+    container.apparmor.security.beta.kubernetes.io/hello-container: localhost/apparmor-example-deny-all
+spec:
+  containers:
+    - name: hello-container
+      image: busybox
+      command: ["sh", "-c", "echo Hello from my container! && sleep 3600"]
+```
+
+The above annotation applies our AppArmor profile to the container called **hello-container**. Save
+the above YAML to **pod-apparmor.yaml** and create the Pod using **kubectl apply -f pod-armor.yaml**.
+
+Once the Pod is running, let’s try creating a file using the **touch** command:
+
+```
+$ kubectl exec -it hello-pod -- touch hello.txt
+touch: hello.txt: Permission denied
+command terminated with exit code 1
+```
+
+As expected, we get the "Permission denied" messsage because we applied the AppArmor profile to
+it. If we’d execute the same command against a Pod without the AppArmor profile, we’d be able to
+create the file.
+
+One tool I’d like to mention is the profile generation utility called **aa-genprof**. You can install it by
+running **sudo apt install apparmor-utils**. Using this tool, you can automatically generate an
+AppArmor profile for your application.
+
+Let’s create a trivial Go application that writes a string to a file in the **/tmp** folder:
+
+_ch8/main.go_
+```
+package main
+
+import (
+	"io/ioutil"
+)
+
+func main() {
+	d1 := []byte("hello")
+	err := ioutil.WriteFile("/tmp/file1.txt", d1, 0644)
+	if err != nil {
+		panic(err)
+	}
+}
+```
+
+To run the above app, run **go run main.go**. There won’t be any output, but you can check that the
+app created the /tmp/file1.txt file. Let’s also build the binary, and we will use the **aa-genprof** to
+generate the AppArmor profile for it:
+
+```
+$ go build main.go
+$ sudo aa-genprof main
+~/apparmor-test$ sudo aa-genprof main
+Writing updated profile for /home/user/apparmor-test/main.
+Setting /home/user/apparmor-test/main to complain mode.
+....
+Profiling: /home/user/apparmor-test/main
+
+[(S)can system log for AppArmor events] / (F)inish
+```
+
+Now you have to run the binary from a different terminal window for the tool to generate the
+profile. Once you’ve done that, press the S key, so the tool reads the AppArmor events. This is what
+you should see:
+
+```
+...
+Reading log entries from /var/log/syslog.
+Complain-mode changes:
+Profile: /home/user/apparmor-test/main
+Path: /tmp/file1.txt
+Mode: w
+Severity: unknown
+  [1 - /tmp/file1.txt]
+[(A)llow] / (D)eny / (I)gnore / (G)lob / Glob with (E)xtension / (N)ew / Abo(r)t / (F
+)inish / (M)ore
+```
+
+You can then decide if you want to Allow this action, Deny it, or pick any other available options.
+After you’ve decided what to do, you will be prompted to save the profile changes. You can now exit
+the tool (use the F key) and look at the generated profile. All profiles are stored under
+**/etc/apparmor.d** folder. Here’s how the profile looks like if you’ve selected **Allow** action for writing
+to the **/tmp/file1.txt** file:
+
+```
+$ sudo cat /etc/apparmor.d/home.user.apparmor-test.main
+#include <tunables/global>
+
+/home/user/apparmor-test/main {
+  #include <abstractions/base>
+
+  /home/user/apparmor-test/main mr,
+  /tmp/file1.txt w,
+}
+```
+
+The profile would look similar if we’d deny the action:
+```
+  deny /tmp/file1.txt w,
+```
+
+### **Seccomp**
+
+Seccomp or secure computing mode allows a process to transition into a protected state where it
+can’t make any system calls, except to **exit()**, **sigreturn()**, **read()** and **write()** to already-open file
+descriptors. In case the process tries to call any other system calls, the kernel will terminate it. You
+can provide the Secomp profile either at the Pod or container level. If you provide it at both levels,
+the options at the container level will take precedence.
+
+You can define the seccomp profile name using the **seccompProfile** field, like this:
+
+```
+...
+securityContext:
+  seccompProfile:
+    type: RuntimeDefault
+```
+
+There are three valid options for the type: **RuntimeDefault**, **Unconfined**, and **Localhost**. Additionally,
+you can also create your Seccomp profiles. You can reference them using the **Localhost** type and
+and a **localhostProfile** field pointing to the file in a kubelet root directory (e.g.
+**[kubelet]/seccomp/profiles/my-profile.json)**. For example:
+
+```
+...
+securityContext:
+  seccompProfile:
+  type: Localhost
+  localhostProfile: profiles/my-profile.json
+```
+
+## Pod security policies
+
+With the PodSecurityPolicy API, you can define and manage all security-related fields in your Pods.
+For example, you can limit what can run on your cluster and with what level of privilege. For the
+PodSecurityPolicy to work, you need to enable corresponding admission controllers. The admission
+controller enforces the conditions defined in the PodSecurityPolicy.
+
+In addition to the security settings we described previously, you can use the PodSecurityPolicy to
+control the following:
+
+- Running privileged containers
+- Using host namespaces
+- Using the host network and ports
+- Using volume types
+- Using host filesystem
+- Using user and group Ids of the container
+- Restricting root privilege escalations
+- Linux capabilities
+- SELinux settings
+- AppArmor profiles
+- Seccomp profiles
+
+If you want to try out the PodSecurityPolicy using Minikube, you have to make sure to start it with
+the **PodSecurityPolicy** admission controller and **pod-security-policy** addon enabled. Alternatively,
+you can use one of the cloud-managed clusters that have the PodSecurityPolicy enabled. Here’s the
+command you can use to start the Minikube cluster with:
