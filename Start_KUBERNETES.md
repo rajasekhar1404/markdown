@@ -5403,3 +5403,189 @@ Hello postStart!
 
 If you delete the Pod, you will also notice that it takes an extra 10 seconds for Kubernetes to delete
 it.
+
+# Application Health
+
+The kubelet component in Kubernetes uses different health checking mechanisms to verify if the
+containers inside your Pods have started (startup probe), are ready to receive traffic (readiness
+probe), and are healthy (liveness probe).
+
+To explain how health checks or probes in Kubernetes work, we will be using a sample application
+with endpoints defined in the table below.
+
+_Table 4. Endpoints_
+
+| Endpoint | Description |
+|----------|-------------|
+| /healthy | Returns an HTTP 200. If you set the HEALTHY_SLEEP environment variable, it will sleep for the period defined in the variable. For example, if you set HEALTHY_SLEEP=5000, the endpoint waits for 5 seconds before returning HTTP 200. |
+| /healthz | The endpoint returns HTTP 200 for the first 10 seconds. After 10 seconds, it starts returning an HTTP 500. |
+| /ready | Functionally equivalent to the /healthy endpoint (returns HTTP 200). Uses READY_SLEEP environment variable to sleep for the amount of millisecond defined in the variable before returning HTTP 200. |
+| /readyz | The endpoint returns HTTP 500 for the first 10 seconds. After that, it starts returning an HTTP 200.
+| /fail | Returns an HTTP 500 error. Uses FAIL_SLEEP environment variable to sleep for the period (in milliseconds) defined in the variable before returning. |
+
+With the combination of the endpoints above and a couple of environment variables, we will
+simulate different failure scenarios and see how probes can help out.
+
+There are three methods you can use to determine if containers are healthy or not:
+
+- Invoke a command inside the container. The exit code determines if the liveness probe failed or
+not. A non-zero exit code indicates that the container is unhealthy
+- Open a TCP socket. If the socket opens, the probe is successful, otherwise the probe fails
+- Send an HTTP request to the provided URI. The HTTP response code is used to determine if the
+liveness probe succeeds or fails
+
+With the combination of different methods and probes, you can ensure that your containers are ready to receive traffic, healthy, and get restarted in case of a deadlock.
+
+## Application Liveness probe
+
+The liveness probe indicates whether your application is still working as it’s supposed to. In case
+the liveness probe fails, the __kubelet__ will restart the failing container.
+
+Without the liveness probe set, Kubernetes assumes the container healthy and keeps it running.
+Using this probe, you can handle scenarios where your code is deadlocked, or your application is
+not responding anymore. Without the probe, Kubernetes keeps the application running, however, if
+you provide and implement the probe, Kubernetes will restart the container in case the probe fails.
+
+### **HTTP Probe**
+
+Let’s use the App Health example we mentioned at the beginning of this chapter.
+
+In the YAML, we define the liveness probe using an HTTP get request. Kubelet send the HTTP GET
+request to the **/healthz** endpoint on the container, on port **3000**. Kubernetes considers the container
+healthy, as long as the response is greater or equal than 200 and less than 400. In our example, we
+are returning HTTP 200 for the first 10 seconds, and then HTTP 500 afterward.
+
+The **initialDelaySeconds** field tells Kubernetes to wait 3 seconds before it starts calling the probe.
+Similarly, the **periodSeconds** field specifies that the Kubernetes should perform the probe every
+second. "Performing the probe," in this case, means sending a GET request to the specified path and
+port on the container. The kubelet performs the first probe 4 seconds after the container starts (3
+seconds is the initial delay and then 1 second for the first period).
+
+_ch7/liveness.yaml_
+
+```
+apiVersion: v1
+kind: Pod
+metadata:
+  name: liveness
+  labels:
+    app.kubernetes.io/name: liveness
+spec:
+  containers:
+    - name: web
+      image: startkubernetes/app-health:0.1.0
+      ports:
+        - containerPort: 3000
+      livenessProbe:
+        httpGet:
+          path: /healthz
+          port: 3000
+        initialDelaySeconds: 3
+        periodSeconds: 1
+```
+
+Save the above YAML in **liveness.yaml** and create the Pod with **kubectl apply -f liveness.yaml**.
+
+Let’s use the **describe** command to look at the Pod events:
+
+```
+$ kubectl describe po liveness
+...
+Tolerations:    node.kubernetes.io/not-ready:NoExecute op=Exists for 300s
+                node.kubernetes.io/unreachable:NoExecute op=Exists for 300s
+Events:
+  Type Reason Age From Message
+  ---- ------ ---- ---- -------
+  Normal Scheduled 12s default-scheduler Successfully assigned default/liveness
+to minikube
+  Normal Pulled 11s kubelet, minikube Container image "startkubernetes/app-health:0.1.0" already present on machine
+  Normal Created 11s kubelet, minikube Created container web
+  Normal Started 11s kubelet, minikube Started container web
+  Warning Unhealthy 0s kubelet, minikube Liveness probe failed: HTTP probe
+failed with statuscode: 500
+```
+
+The Pod is healthy for the first 10 seconds or so. After that, looking at the last line in the output, the
+liveness probe fails, and Kubernetes restarts the container. Once the container restarts, the same
+story repeats - the liveness probe is healthy for 10 seconds, and then fails.
+
+You can see the number of times Kubernetes restarted the container if you run the **kubectl get po**
+command and look at the **RESTARTS** column:
+
+```
+$ kubectl get po
+NAME      READY   STATUS    RESTARTS    AGE
+liveness  1/1     Running   5           2m31s
+```
+
+In addition to just specifying the path and port for the HTTP check, you can also use the **httpHeaders** field to specify the headers you want the probe to use. For example, if you want to add the **Host** header to the call, you could do it like this:
+
+_ch7/liveness-headers.yaml_
+
+```
+apiVersion: v1
+kind: Pod
+metadata:
+  name: liveness-headers
+  labels:
+    app.kubernetes.io/name: liveness-headers
+spec:
+  containers:
+    - name: web
+      image: startkubernetes/app-health:0.1.0
+      imagePullPolicy: Always
+      ports:
+        - containerPort: 3000
+      livenessProbe:
+        httpGet:
+          path: /healthz
+          port: 3000
+          httpHeaders:
+            - name: Host
+              value: liveness-host
+        initialDelaySeconds: 3
+        periodSeconds: 1
+```
+
+Save the above YAML in **liveness-headers.yaml** and create the Pod using **kubectl apply -f liveness-headers.yaml**. The App Health application automatically logs the headers from incoming requests,
+so after the Pod starts, you can look at the logs:
+
+```
+$ kubectl logs liveness-headers
+
+> app-health@0.1.0 start /app
+> node server.js
+
+appHealth running on port 3000.
+{"host":"liveness-host","user-agent":"kube-probe/1.18","accept-encoding":"gzip"
+,"connection":"close"}
+GET /healthz 200 7.083 ms - 2
+```
+
+Notice the **host** header value is set to **liveness-host**, just like we configured it in the probe configuration.
+
+In addition to the fields mentioned above, you can set a couple of other fields to control the probes'
+behavior. I am mentioning the additional fields in the table below.
+
+_Table 5. Fields_
+
+| Field name | Description |
+|------------|-------------|
+| timeoutSeconds | The number of seconds after which the probe times out. The default value is set to 1 second. Consider increasing this value if your health check probe depends on other services (i.e., you’re invoking other services to determine the health of your current service). |
+| successThreshold | The number of consecutive successes for the probe to be considered successful again after having failed. For example, if set to 5, the health probe needs to succeed five times in a row after a failure to be considered successful. The default and minimum value are 1. For the liveness probe, this value must to be set to 1. |
+| failureThreshold | The number of times probe is retried in case of a failure. If the probe is still failing after this threshold, the container is either restarted when using the liveness probe or marked as unhealthy if using the readiness probe. The default value is 3. The minimum value is 1. |
+
+### **Command Probe**
+
+The second mechanism is a command probe. With the comman probe, Kubernetes runs a command
+inside of your container to determine if the container is healthy or not. If the command returns
+with exit code 0, Kubernetes considers the container healthy. If exit code is different from 0,
+Kubernetes considers the container unhealthy.
+
+You can use the command probe when you can’t run an HTTP probe. Let’s consider an example
+where your REST API running in the container requires an Authorization header. You can provide
+header to HTTP probe. However, you can’t specify the authorization header value in the YAML.
+What you could do in this case is to mount the authorization token secret inside the container and
+then run curl as part of the command probe.
+
+Here’s how you can provide a command to execute to the liveness probe:
