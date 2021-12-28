@@ -8802,3 +8802,358 @@ deal with certificates. So, whenever we need a new certificate or renew an exist
 cert-manager will do that for us.
 
 The first step is to create a namespace to deploy the cert-manager in:
+
+```
+$ kubectl create ns cert-manager
+namespace/cert-manager created
+```
+
+Next, we will add the **jetstack** Helm repository and refresh the local repository cache:
+
+```
+$ helm repo add jetstack https://charts.jetstack.io
+"jetstack" has been added to your repositories
+
+$ helm repo update
+Hang tight while we grab the latest from your chart repositories...
+...Successfully got an update from the "jetstack" chart repository
+Update Complete. ⎈ Happy Helming!⎈
+```
+
+Now we are ready to install the cert-manager. Run the following Helm command to install the cert-manager:
+
+```
+helm install \
+  cert-manager jetstack/cert-manager \
+  --namespace cert-manager \
+  --version v0.15.1 \
+  --set installCRDs=true
+```
+In the output, you will notice the message saying that Helm deployed the cert-manager successfully.
+
+Before we can use it, we need to set up either a **ClusterIssuer** or an **Issuer** resource and configure
+it. This resource represents a certificate signing authority (CA) and allows cert-manager to issue
+certificates.
+
+The difference between a **ClusterIssuer** and an **Issuer** is that the **ClusterIssuer** operates at the
+cluster level and the **Issuer** resource works on a namespace. For example, you could configure
+different Issuer resources for each namespace. Alternatively, you could create a **ClusterIssuer** to
+issue certificates in any namespace.
+
+Cert-manager supports multiple issuer types. Let’s Encrypt uses the ACME protocol, and therefore
+we will configure an ACME issuer type. These protocols support different challenge mechanisms to
+determine and verify domain ownership.
+
+### **Challenges**
+
+In the ACME protocol, cert-manager supports two challenges to verify the domain ownership: the
+**HTTP-01** and **DNS-01** challenge. You can read more details about each one of these on [Let’s Encrypt
+website](https://letsencrypt.org/docs/challenge-types/).
+
+In short, the HTTP-01 challenge is the most common challenge type. The challenge involves a file
+with a token that you put in a certain location on your server. For example: **http://[my-cool-domain]/.well-known/acme-challenge/[token-file]**.
+
+The DNS-01 challenge involves modifying a DNS record for your domain. To pass this challenge, you
+need to create a TXT DNS record with a specific value under the domain you want to claim. Using
+the DNS-01 challenge only makes sense if your domain registrar has an API that automatically
+updates the DNS records. See the [full list of providers that integrate with the Let’s Encrypt DNS
+validation](https://community.letsencrypt.org/t/dns-providers-who-easily-integrate-with-lets-encrypt-dns-validation/86438).
+
+I will be using the HTTP-01 challenge as it is more generic than the DNS-01, which depends on your
+domain registrar.
+
+Let’s deploy a **ClusterIssuer** we will be using. Make sure you replace the email with your email
+address:
+
+*practical/cluster-issuer.yaml*
+```
+apiVersion: cert-manager.io/v1alpha2
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    email: hello@example.com
+    server: https://acme-v02.api.letsencrypt.org/directory
+    privateKeySecretRef:
+      name: letsencrypt-prod
+    solvers:
+      - http01:
+          ingress:
+            class: nginx
+        selector: {}
+```
+
+Let’s make sure ClusterIssuer gets created, and it’s ready by running **kubectl describe clusterissuer** and confirming that the ACME account was registered (i.e., the email address you
+provided):
+```
+...
+Status:
+  Acme:
+  Last Registered Email: hello@example.com
+  Uri: https://acme-v02.api.letsencrypt.org/acme/acct/89498526
+Conditions:
+  Last Transition Time: 2020-06-22T20:36:04Z
+  Message: The ACME account was registered with the ACME server
+  Reason: ACMEAccountRegistered
+  Status: True
+  Type: Ready
+Events: <none>
+```
+
+Similarly, if you run **kubectl get clusterissuer** you should see the indication that the **ClusterIssuer**
+is ready:
+
+```
+$ kubectl get clusterissuer
+NAME READY AGE
+letsencrypt-prod True 2m30s
+```
+
+Later on, once we deployed the Ingress controller and set up the DNS record on the domain, we will
+also create a **Certificate** resource.
+
+### **Ambassador**
+
+To install Ambassador gateway, run the two commands below. The first one will take care of
+installing all CRD (custom resource definitions), and the second one installs the RBAC (Role-Based
+Access Control) resources and creates the Ambassador deployment.
+
+```
+$ kubectl apply -f https://www.getambassador.io/yaml/ambassador/ambassador-crds.yaml
+...
+$ kubectl apply -f https://www.getambassador.io/yaml/ambassador/ambassador-rbac.yaml
+```
+
+Finally, we need to create a LoadBalancer service that exposes two ports: 80 for HTTP traffic and
+443 for HTTPS.
+
+*practical/ambassador-svc.yaml*
+```
+apiVersion: v1
+kind: Service
+metadata:
+  name: ambassador
+spec:
+  type: LoadBalancer
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+    - name: https
+      port: 443
+      targetPort: 8443
+  selector:
+    service: ambassador
+```
+
+Save the above YAML in **ambassador-svc.yaml** file and run **kubectl apply -f ambassador-svc.yaml**.
+**NOTE**
+> Deploying the above service will create a load balancer in your cloud providers
+account.
+
+If you list the services, you will notice an External IP assigned to the **ambassador** service:
+
+```
+$ kubectl get svc
+NAME          TYPE            CLUSTER-IP       EXTERNAL-IP        PORT(S)        AGE
+ambassador    LoadBalancer    10.0.78.66       51.143.120.54      80:31365/TCP   97s
+ambassador-admin NodePort     10.0.65.191      <none>             8877:30189/TCP 4m20s
+kubernetes    ClusterIP       10.0.0.1         <none>             443/TCP        30d
+```
+
+Now that we have the External IP address, you can go to the website where you registered your
+domain and create an A DNS record that will point the domain to the external IP. Pointing the
+domain to an external IP will allow you to enter **[http://[my-domain.com]** in your browser, and it will
+resolve to the above IP address (the ingress controller inside the cluster).
+
+I will be using my domain called **startkubernetes.com**. I will set up a subdomain
+**dogs.startkubernetes.com** to point to my load balancer (e.g. **51.143.120.54**) using an A record.
+Regardless of where you registered your domain, you should be able to update the DNS records.
+Check the documentation on your domain registrars website on how to do that.
+
+Let’s set up an Ingress resource, so we can reach the Dog Pic website we deployed on the
+subdomain (make sure you replace the dogs.startkubernetes.com with your domain or subdomain
+name):
+
+_practical/dogs-ingress.yaml_
+```
+apiVersion: networking.k8s.io/v1beta1
+kind: Ingress
+metadata:
+  name: my-ingress
+  annotations:
+    kubernetes.io/ingress.class: ambassador
+spec:
+  rules:
+    - host: dogs.startkubernetes.com
+      http:
+        paths:
+          - backend:
+              serviceName: dogpic-service
+              servicePort: 3000
+```
+
+With ingress deployed, you can open http://dogs.startkubernetes.com. You should see the Dog Pic website below.
+
+![Figure 49. Dog Pic Website](https://i.gyazo.com/d8a5c6048de9849f2b9b297d8646e2c2.png)
+
+*Figure 49. Dog Pic Website*
+
+### **Requesting a certificate**
+
+To request a new **certificate**, you need to create a Certificate resource. This resource includes the
+issuer reference (**ClusterIssuer** we created earlier), DNS names we want to request certificates for
+(**dogs.startkubernetes.com**), and the Secret name the certificate will be stored in.
+
+*practical/certificate.yaml*
+```
+apiVersion: cert-manager.io/v1alpha2
+kind: Certificate
+metadata:
+  name: ambassador-certs
+  namespace: default
+spec:
+  secretName: ambassador-certs
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+  dnsNames:
+    - dogs.startkubernetes.com
+```
+
+Make sure you replace the **dogs.startkubernetes.com** with your domain name. Once you’ve done that, save the YAML in cert.yaml and create the certificate using **kubectl apply -f -cert.yaml**.
+
+If you list the pods, you will notice a new pod called **cm-acme-http-solver**:
+
+```
+$ kubectl get po
+NAME                          READY    STATUS    RESTARTS     AGE
+ambassador-9db7b5d76-jlcdg    1/1      Running   0            22h
+ambassador-9db7b5d76-qcwgk    1/1      Running   0            22h
+ambassador-9db7b5d76-xsfw4    1/1      Running   0            22h
+cm-acme-http-solver-qzh6l     1/1      Running   0            25m
+dogpic-web-7bf547bd54-f2pff   1/1      Running   0            22h
+```
+
+Cert-manager created this pod to serve the token file as explained in the [Challenges]() section and
+verify the domain name.
+
+You can also look at the logs from the pod to see the values pod expects for the challenge:
+
+```
+$ kubectl logs cm-acme-http-solver-qzh6l
+I0622 20:39:26.712391 1 solver.go:39] cert-manager/acmesolver "msg"="starting
+listener" "expected_domain"="dogs.startkubernetes.com" "expected_key"
+="iqUZlG9v1K8czpAKaTpLfL278piwfmN4VZNvuwD0Ks.xonKHFvEQg2Ox_mI0cPM7UpCUHfu6H4aKtRcdrpiLik" "expected_token"
+="iqUZlG9v1K8czpAKaTpLfL278piwf-mN4VZNvuwD0Ks" "listen_port"=8089
+```
+
+However, this pod is not exposed, so there’s no way for Let’s Encrypt to access it and do the
+challenge. So we need to expose this pod through an ingress. This involves creating a Kubernetes
+Service that points to the pod and updating the ingress. To update the ingress, we will use the
+**Mapping** resource from Ambassador. This resource defines a mapping to redirect requests with the
+prefix **./well-known/acme-challenge** to the Kubernetes service that goes to the pod.
+
+*practical/challenge.yaml*
+```
+apiVersion: getambassador.io/v2
+kind: Mapping
+metadata:
+  name: challenge-mapping
+spec:
+  prefix: /.well-known/acme-challenge/
+  rewrite: ""
+  service: challenge-service
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: challenge-service
+spec:
+  ports:
+    - port: 80
+      targetPort: 8089
+  selector:
+    acme.cert-manager.io/http01-solver: "true"
+```
+
+Store the above in **challenge.yaml** and deploy it using **kubectl apply -f challenge.yaml**. The cert-manager will retry the challenge and issue the certificate.
+
+You can run **kubectl get cert** and confirm the **READY** column shows True, like this:
+
+```
+$ kubectl get cert
+NAME               READY   SECRET            AGE
+ambassador-certs   True    ambassador-certs  35m
+```
+
+Here are the steps we followed to request a certificate and a figure to visualize the process.
+
+1. Request the certificate by creating the **Certificate** resource.
+2. Cert-manager creates the **http-solver** pod (exposed through the **challenge-service** we created)
+3. Cert-manager uses the issuer referenced in the **Certificate** and requests the certificates for the
+**dnsNames** from the authority (Let’s Encrypt)
+4. The authority sends the challenge for the **http-solver** to prove that we own the domains and
+checks that the challenges are solved (i.e. downloads the file from **/.well-known/acme-challenge/**)
+5. Issued certificate and key are stored in Secret, referenced by the Issuer resource
+
+![Figure 50. Requesting Certificates](https://i.gyazo.com/c4cf1ecc90593aefc47b4895ff3bcf13.png)
+
+*Figure 50. Requesting Certificates*
+
+### **Configuring TLS in Ingress**
+
+To secure an Ingress, we have to specify a Secret that contains the certificate and the private key.
+We defined the **ambassador-certs** secret name in the **Certificate** resource we created earlier.
+
+*practical/ingres-tls.yaml*
+```
+apiVersion: networking.k8s.io/v1beta1
+kind: Ingress
+metadata:
+  name: my-ingress
+  annotations:
+    kubernetes.io/ingress.class: ambassador
+spec:
+  tls:
+    - hosts:
+        - dogs.startkubernetes.com
+      secretName: ambassador-certs
+  rules:
+    - host: dogs.startkubernetes.com
+      http:
+        paths:
+          - path: /
+            backend:
+              serviceName: dogpic-service
+              servicePort: 3000
+```
+
+Under resource specification (**spec**), we use the **tls** key to specify the hosts and the secret name
+where the certificate and private key are stored.
+
+Save the above YAML in **ingress-tls.yaml** and apply it with **kubectl apply -f ingress-tls.yaml**.
+
+If you navigate to your domain using https (e.g. https://dogs.startkubernetes.com) you will see that
+the connection is secure, and it is using a valid certificate from Let’s Encrypt.
+
+![Figure 51. Dog Pic Website via HTTPS](https://i.gyazo.com/d6bc1c9c74249c1e06bf0311f7cfa1c5.png)
+
+*Figure 51. Dog Pic Website via HTTPS*
+
+### **Cleanup**
+
+Use the commands below to remove the everything you installed in this section:
+
+```
+kubectl delete cert ambassador-certs
+kubectl delete secret ambassador-certs
+kubectl delete -f https://www.getambassador.io/yaml/ambassador/ambassador-crds.yaml
+kubectl delete -f https://www.getambassador.io/yaml/ambassador/ambassador-rbac.yaml
+kubectl delete svc ambassador
+helm uninstall cert-manager -n cert-manager
+kubectl delete svc dogpic-service challenge-service
+kubectl delete deploy dogpic-web
+kubectl delete ing my-ingress
+```
