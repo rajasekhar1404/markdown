@@ -6982,38 +6982,49 @@ spec:
   port: 500
 ```
 
-Let’s break down the above YAML. The podSelector tells us that the policy applies to all Pods in the
-default namespace that have the app: hello label set. We are defining policy for both ingress and
-egress traffic.
-The calls to the Pods policy applies to can be made from any IP within the CIDR block 172.17.0.0/16
+Let’s break down the above YAML. The **podSelector** tells us that the policy applies to all Pods in the
+**default** namespace that have the **app: hello** label set. We are defining policy for both ingress and egress traffic.
+
+The calls to the Pods policy applies to can be made from any IP within the CIDR block **172.17.0.0/16**
 (that’s 65536 IP addresses, from 172.17.0.0 to 172.17.255.255), except for Pods whose IP falls within
-the CIDR block 172.17.1.0/24 (256 IP addresses, from 172.17.1.0 to 172.17.1.255) to the port 8080.
+the CIDR block 172.17.1.0/24 (256 IP addresses, from 172.17.1.0 to 172.17.1.255) to the port **8080**.
 Additionally, the calls to the Pods policy applies to can be coming from any Pod in the namespace(s)
-176
-with the label owner: ricky and any Pod from the default namespace, labeled version: v2.
-Figure 44. Ingress Network Policy
+with the label **owner: ricky** and any Pod from the **default** namespace, labeled **version: v2**.
+
+![Figure 44. Ingress Network Policy](https://i.gyazo.com/2b765ff6b42ec696a16752d738443501.png)
+
+_Figure 44. Ingress Network Policy_
+
 The egress policy specifies that Pods with the label app: hello in the default namespace can make
 calls to any IP within 10.0.0.0/24 (256 IP addresses, from 10.0.0.0, 10.0.0.255), but only to the port
-5000.
-177
-Figure 45. Egress Network Policy
+**5000**.
+
+![Figure 45. Egress Network Policy](https://i.gyazo.com/583ac2cdda60179401267c140a2048c3.png)
+
+_Figure 45. Egress Network Policy_
+
 The Pod and namespace selectors support and and or semantics. Let’s consider the following
 snippet:
+
+```
   ...
   ingress:
   - from:
-  - namespaceSelector:
-  matchLabels:
-  user: ricky
-  podSelector:
-  matchLabels:
-  app: website
+    - namespaceSelector:
+        matchLabels:
+          user: ricky
+      podSelector:
+        matchLabels:
+          app: website
   ...
-The above snippet with a single element in the from array, includes all Pods with labels app: website
-from the namespace labeled user: ricky. This is the equivalent of and operator.
-If you change the podSelector to be a separate element in the from array by adding -, you are using
-the or operator.
-178
+```
+
+The above snippet with a single element in the **from** array, includes all Pods with labels **app: website** from the namespace labeled **user: ricky**. This is the equivalent of **and** operator.
+
+If you change the **podSelector** to be a separate element in the **from** array by adding -, you are using
+the **or** operator.
+
+```
   ...
   ingress:
   - from:
@@ -7024,19 +7035,31 @@ the or operator.
   matchLabels:
   app: website
   ...
-The above snippet includes all Pods labeled app: website or all Pods from the namespace with the
-label user: ricky.
-Installing Cilium
+```
+
+The above snippet includes all Pods labeled **app: website** or all Pods from the namespace with the
+label **user: ricky**.
+
+### **Installing Cilium**
+
 Network policies are implemented (and rules enforced) through network plugins. If you don’t
 install a network plugin, the policies won’t have any effect.
-I will use the Cilium plugin and install it on top of Minikube. You could also use a different plugin,
-such as Calico.
+
+I will use the [Cilium plugin](https://docs.cilium.io/en/stable/gettingstarted/minikube/#install-cilium) and install it on top of Minikube. You could also use a different plugin,
+such as [Calico](https://www.projectcalico.org/).
+
 If you already have Minikube running, you will have to stop and delete the cluster (or create a
 separate one). You will have to start Minikube with the cni flag for the Cilium to work correctly:
+
+```
 $ minikube start --network-plugin=cni
+```
+
 Once Minikube starts, you can install Cilium.
+
+```
 $ kubectl create -f
-https://raw.githubusercontent.com/cilium/cilium/1.8.3/install/kubernetes/quickinstall.yaml
+https://raw.githubusercontent.com/cilium/cilium/1.8.3/install/kubernetes/quick-install.yaml
 all/kubernetes/quick-install.yaml
 serviceaccount/cilium created
 serviceaccount/cilium-operator created
@@ -7047,24 +7070,33 @@ clusterrolebinding.rbac.authorization.k8s.io/cilium created
 clusterrolebinding.rbac.authorization.k8s.io/cilium-operator created
 daemonset.apps/cilium created
 deployment.apps/cilium-operator created
-Cilium is installed in kube-system namespace, so you can run kubectl get po -n kube-system and
+```
+
+Cilium is installed in **kube-system** namespace, so you can run **kubectl get po -n kube-system** and
 wait until the Cilium Pods are up and running.
+
 Let’s look at an example that demonstrates how to disable egress traffic from the Pods.
-179
-ch8/no-egress-pod.yaml
+
+_ch8/no-egress-pod.yaml_
+```
 apiVersion: v1
 kind: Pod
 metadata:
   name: no-egress-pod
   labels:
-  app.kubernetes.io/name: hello
+    app.kubernetes.io/name: hello
 spec:
   containers:
-  - name: container
-  image: radial/busyboxplus:curl
-  command: ["sh", "-c", "sleep 3600"]
-Save the above YAML to no-egress-pod.yaml and create the Pod using kubectl apply -f no-egresspod.yaml.
-Once the Pod is running, let’s try calling google.com using curl:
+    - name: container
+      image: radial/busyboxplus:curl
+      command: ["sh", "-c", "sleep 3600"]
+```
+
+Save the above YAML to **no-egress-pod.yaml** and create the Pod using **kubectl apply -f no-egress-pod.yaml**.
+
+Once the Pod is running, let’s try calling **google.com** using **curl**:
+
+```
 $ kubectl exec -it no-egress-pod -- curl -I -L google.com
 HTTP/1.1 301 Moved Permanently
 Location: http://www.google.com/
@@ -7078,5 +7110,7 @@ X-XSS-Protection: 0
 X-Frame-Options: SAMEORIGIN
 HTTP/1.1 200 OK
 ...
+```
+
 The call completes successfully. Let’s define a network policy that will prevent egress for Pods with
-the label app.kubernetes.io/name: hello:
+the label **app.kubernetes.io/name: hello**:
