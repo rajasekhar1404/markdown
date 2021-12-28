@@ -86,13 +86,13 @@ A couple of examples of container orchestrators are [Marathon](https://mesospher
 
 Frequently, people refer to Kubernetes as "K8S". K8S is a __numeronym__ for Kubernetes. The first (K) and the last letter (S) are the first, and the last letters in the word Kubernetes, and 8 is the number of characters between those two letters. Other popular numeronyms are "i18n" for internationalization or "a11y" for accessibility.
 
-# What is the difference Kubernetes and Docker?
+## What is the difference Kubernetes and Docker?
 
 Using Docker, you can package your application. This package is called an image or a Docker image. You can think of an image as a template. Using Docker, you can create containers from  your images. For example, if your Docker image contains a Go binary or a Java application, then the container is a running instance of that application. If you want to learn more about Docker, check out the [Beginners Guide to Docker](https://www.learncloudnative.com/blog/2020-04-29-beginners-guide-to-docker/).
 
 Kubernetes, on the other hand, is a container orchestration tool that knows how to manage Docker (and other) containers. Kubernetes uses higher-level constructs such as Pods to wrap Docker (or other) containers and gives you the ability to manage them.
 
-# Kubernetes vs. Docker Swarm?
+## Kubernetes vs. Docker Swarm?
 
 Docker Swarm is a container orchestration tool, just like Kubernetes is. You can use it to manage Docker containers. Using Swarm, you can connect multiple Docker hosts into a virtual host. You can then use Docker CLI to talk to multiple hosts at once and run Docker containers on it.
 
