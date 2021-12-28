@@ -7580,3 +7580,441 @@ $ kubectl scale deploy hello --replicas=10
 ```
 
 If you list the Pods, there will be five of them running. If you look at the events, you will see the
+error Kubernetes reported:
+
+```
+$ kubectl get events | grep replicaset/hello
+...
+71s         Warning       FailedCreate      replicaset/hello-56f578b46f      Error
+creating: po
+ds "hello-56f578b46f-96t4j" is forbidden: exceeded quota: pods-limit, requested: pods
+=1, used:
+pods=5, limited: pods=5
+...
+```
+
+Let’s modify the quota and include some CPU and memory limits as well.
+
+*ch9/res-quota-mem-cpu.yaml*
+```
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: res-quota
+spec:
+  hard:
+    pods: "5"
+    memory: "200m"
+    cpu: "0.5"
+```
+
+Save the above YAML to **res-quota-mem-cpu.yaml** and update the ResourceQuota using **kubectl apply
+-f res-quota-mem-cpu.yaml**.
+
+You can look at the quota details using the **describe** command:
+
+```
+$ kubectl describe quota res-quota
+Name: res-quota
+Namespace: default
+Resource Used Hard
+-------- ---- ----
+cpu 0 500m
+memory 0 200m
+pods 5 5
+```
+
+Let’s scale down the Deployment back to 1 Pod with **kubectl scale deploy hello --replicas=1**. If
+you try to create a Pod that exceeds the memory or CPU, the Kubernetes CLI will fail right away.
+Here’s a message you might get if that happens:
+
+```
+Error from server (Forbidden): pods "quota-pod" is forbidden: exceeded quota: res-quota, requested: memory=100Mi, used: memory=0, limited: memory=200m
+```
+
+Similarly, if you try to create a Pod without the CPU and memory requests defined, you will get an
+error. Here’s what happens if you run **kubectl create deploy my-nginx --image=nginx** and then look
+at the ReplicaSet details:
+
+```
+$ kubectl describe replicaset my-nginx
+...
+Error creating: pods "my-nginx-6b74b79f57-dfljt" is forbidden: failed quota: res-quota: must specify cpu,memory
+...
+```
+
+Let’s create a Pod that defines the memory and CPU requests:
+
+*ch9/quota-pod.yaml*
+```
+apiVersion: v1
+kind: Pod
+metadata:
+  name: quota-pod
+spec:
+  containers:
+    - name: quota-pod
+      image: busybox
+      command: ["sh", "-c", "sleep 3600"]
+      resources:
+        requests:
+          memory: "100m"
+          cpu: "0.1"
+```
+
+Save the above YAML to **quota-pod.yaml** and create the Pod using **kubectl apply -f quota-pod.yaml**.
+
+If you describe the quota now, you will see how much memory and CPU is the Pod using:
+
+```
+$ kubectl describe quota
+Name: res-quota
+Namespace: default
+Resource Used Hard
+-------- ---- ----
+cpu 100m 500m
+memory 100m 200m
+pods 2 5
+```
+
+Before we continue, make sure you delete the quota using **kubectl delete quota res-quota**, and the
+Deployment (**kubectl delete deploy hello**) and the Pod (**kubectl delete po quota-pod**).
+
+## Horizontal scaling
+
+Previously, you’ve learned how to scale the Pods manually, and now you also know how to request
+and limit the resources. With the help of the metrics server, we can horizontally scale Pods. For
+example, if the CPU utilization is getting high or close to the limit, you can add more replicas, and
+once the utilization drops, you can scale the Pods down.
+
+The resource and controller you can use to scale Pods automatically is the **Horizontal Pod
+Autoscaler (HPA)**. HPA periodically checks the Pod resource utilization and calculates the number
+of replicas required, based on the HPA resource settings. Based on these values, it adjusts the
+replicas field.
+
+Let’s create a Deployment with an image that runs a computation that takes a while. Then, we will
+start sending request to it, to see the metrics we get from the Pods:
+
+*ch9/computations.yaml*
+```
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: computations
+  labels:
+    app.kubernetes.io/name: computations
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: computations
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: computations
+    spec:
+      containers:
+        - name: computations
+          image: startkubernetes/computations:0.1.0
+          ports:
+            - containerPort: 8080
+          resources:
+            limits:
+              cpu: 100m
+              memory: 10Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: computations
+  labels:
+    app.kubernetes.io/name: computations
+spec:
+  selector:
+    app.kubernetes.io/name: computations
+  ports:
+    - port: 8080
+```
+
+Save the above YAML to **computations.yaml** and create the Service and Deployment with **kubectl
+apply -f computations.yaml**.
+Next, we will create a Pod called **load** and run the shell inside. From inside the Pod, we will call the
+**computations** service in an endless loop:
+
+```
+$ kubectl run -it --rm load --image=radial/busyboxplus:curl -- /bin/sh
+```
+
+When you get the terminal inside the container, run the endless loop:
+
+```
+$ while true; do curl http://computations:8080; done
+DoneDoneDoneDoneDoneDone
+...
+```
+
+You will start getting back the response from the service (**Done**). Leave it running for a couple of
+minutes and then run the **kubectl top pod** command to see the load. You can also specify the
+--containers flag to show the container names:
+
+```
+$ kubectl top pod --containers
+POD                            NAME            CPU(cores)       MEMORY(bytes)
+computations-b6f8f97c4-d9rbg   computations    96m              5Mi
+load                           load            95m              2Mi
+```
+
+Both the **computations** Pod and the **load** Pod report the memory and CPU usage. Notice the CPU
+usage for the computations Pod is getting close to **100m** - this is the limit we set in the Deployment.
+
+Let’s create a horizontal pod auto-scaler that will scale out the Pods when the average CPU
+utilization hits 50%. We also specify the upper bound, the max number of replicas, as we don’t want
+to scale the Pod indefinitely. With the **scaleTargetRef** we are defining which resource to use
+(Deployment). Under **metrics** we are specifying the resource the HPA should use to determine if the
+Deployment should be scaled or not.
+
+*ch9/hpa.yaml*
+```
+kind: HorizontalPodAutoscaler
+apiVersion: autoscaling/v2beta2
+metadata:
+  name: computations
+spec:
+  maxReplicas: 10
+  minReplicas: 1
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: computations
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 50
+```
+
+Save the above YAML to **hpa.yaml** and create the HorizontalPodAutoscaler using **kubectl apply -f hpa.yaml**. With the **curl** command from earlier still running, if you look at the details of the HPA,
+you should how many replicas were already created by the HPA. After a couple of minutes, the HPA
+will scale the Pod as shown in the **REPLICAS** column:
+
+```
+$ kubectl get hpa
+NAME REFERENCE TARGETS MINPODS MAXPODS REPLICAS AGE
+computations Deployment/computations 59%/50% 1 10 3 3m8s
+```
+
+Looking at the **top** command, you will see that this time each Pod is consuming around 57m of CPU,
+which is under the limit of 100m and less than a single Pod was consuming:
+
+```
+$ kubectl top pod --containers
+POD                           NAME          CPU(cores)      MEMORY(bytes)
+computations-b6f8f97c4-4k5mx  computations  57m             3Mi
+computations-b6f8f97c4-d9rbg  computations  57m             3Mi
+computations-b6f8f97c4-mn2ld  computations  59m             4Mi
+```
+
+By scaling out the Pods, we distributed the load across multiple instances.
+
+Let’s stop the endless **curl** loop and observe what happens. You can pass the **-w** flag to the **kubectl get hpa** command to watch the changes:
+
+```
+$ kubectl get hpa -w
+NAME REFERENCE TARGETS MINPODS MAXPODS REPLICAS AGE
+computations Deployment/computations 51%/50% 1 10 4
+5m29s
+computations Deployment/computations 47%/50% 1 10 4
+5m34s
+```
+
+The time it takes for HPA to scale down the replicas depends on the stabilization window setting in
+the field **stabilizationWindow**. The default stabilization window for scaling down is 300 seconds (5
+minutes). Because of this, it will take at least 5 minutes for HPA to start scaling down the Pods.
+
+In addition to CPU, you can also use other metrics, such memory, and even combine them:
+```
+...
+  metrics:
+  - type: Resource
+  resource:
+  name: memory
+  targetAverageValue: 10M
+...
+```
+
+You can use two other groups of metrics in the horizontal pod scaler: the custom and external
+metrics. The custom metric is any metric associated with a Kubernetes resource, while the external
+metric is any custom metric that’s not related to a Kubernetes resource.
+
+To use these metrics, you need to instrument your application (to emit the metrics) first, then install
+a metrics collector that’s going to collect the desired metrics and pass them to the metrics server. A
+popular metrics collector is Prometheus[https://prometheus.io/]. Prometheus can collect the metrics
+from your containers. For the metrics to be available to the HPA, for example, you will also need to
+install a Prometheus Adapter[https://github.com/DirectXMan12/k8s-prometheus-adapter]. The
+Prometheus adapter is a metrics server, and it implements the same metrics API interface.
+
+Once your application is emitting metrics, and Prometheus is collecting and exposing them through
+the metrics API, you can create an HPA that uses the custom metric. For example, let’s say your
+application emits a metric called **invoke_count**, then you can write a HPA like this:
+
+```
+apiVersion: autoscaling/v2beta2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: invoke-count-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: my-app
+  minReplicas: 1
+  maxReplicas: 10
+  metrics:
+    - type: Pods
+      pods:
+        metric:
+          name: invoke_count
+        target:
+          type: AverageValue
+          averageValue: 2
+```
+
+## Using affinity, taints, and tolerations
+
+Using node affinity, you can constrain which nodes your Pod is eligible to run on based on the
+node’s labels. Node **affinity** can be set on Pods using the affinity and **nodeAffinity** fields. There are
+two types of node affinity - with the first one (**requiredDuringSchedulingIgnoredDuringExecution**) you
+can specify rules that **must** be met for a Pod to be scheduled onto a node, for example, "only run
+the Pod on node ABC". The second one (**preferredDuringSchedulingIgnoredDuringExecution**) specifies
+the preferences - for example, "try to run this Pod on node ABC, but if it’s not possible, then run it
+somewhere else".
+
+Let’s look at the labels set on the Minikube node:
+
+```
+$ kubectl get node --show-labels
+NAME    STATUS     ROLES     AGE     VERSION     LABELS
+minikube Ready     master    4h39m   v1.19.0     beta.kubernetes.io/arch
+=amd64,beta.kubernetes.io/os=linux,kubernetes.io/arch=amd64,kubernetes.io/hostname=min
+ikube,kubernetes.io/os=linux,minikube.k8s.io/commit=0c5e9de4ca6f9c55147ae7f90af97eff5b
+efef5f,minikube.k8s.io/name=minikube,minikube.k8s.io/updated_at=2020_09_20T12_00_03_07
+00,minikube.k8s.io/version=v1.13.0,node-role.kubernetes.io/master=
+```
+
+For example, if we wanted the Pods to end up on nodes with the following label
+kubernetes.io/os=linux, we could define the Pod like this:
+
+```
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-affinity
+spec:
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+            - key: kubernetes.io/os
+              operator: In
+              values:
+              - linux
+  containers:
+  - name: container
+    image: busybox
+    command: ["sh", "-c", "sleep 3600"]
+```
+
+If you deploy the above Pod to your Minikube cluster, it will all work. Let’s say we wanted the Pod
+to end up on a node running Windows (e.g., **kubernetes.io/os=windows**).
+
+```
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-affinity
+spec:
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchExpressions:
+          - key: kubernetes.io/os
+            operator: In
+            values:
+            - windows
+  containers:
+  - name: container
+    image: busybox
+    command: ["sh", "-c", "sleep 3600"]
+```
+
+In this case, the Pod will stay pending because we don’t have a node with that label. This is the
+error you will get if you describe the Pod:
+
+```
+$ kubectl describe po pod-affinity
+...
+  Type     Reason     Age     From    Message
+  ---- ------ ---- ---- -------
+  Warning FailedScheduling 8s (x2 over 8s) default-scheduler 0/1 nodes are
+available: 1 node(s) didn't match node selector.
+...
+```
+
+While the affinity 'attracts' Pods to specified nodes, **taints** do the opposite. You can use taints to
+keep Pods off specific nodes. You use taints in combination with **tolerations**. They work together to
+ensure Pods don’t get scheduled onto appropriate nodes. You can apply taints onto nodes to mark
+them that they should not accept any Pods that do not tolerate them.
+
+Each taint has three parts: a key, value, and effect, and it looks like this: **key=value:effect**. The key
+and value is something you can pick, but the effect can only be one of the following value:
+**NoSchedule**, **PreferNoSchedule**, or **NoExecute**.
+
+One of the use cases for using taints and tolerations is to dedicate a set of nodes for specific users or
+running specialized hardware (GPUs). In that case, you only want to run workloads that need the
+specialized hardware on those nodes and keep the rest of the Pods off those nodes.
+
+Here’s an example of how you can use **kubectl taint** command to add a taint to the node:
+
+```
+$ kubectl taint nodes my-node special=true:NoSchedule
+The above command adds a taint with a key special and value true to my-node. You could then
+define the tolerations in your Pods like this:
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-taint
+spec:
+  tolerations:
+  - key: "special"
+  operator: "Equal"
+  value: "true"
+  effect: "NoSchedule"
+  containers:
+  - name: container
+    image: busybox
+    command: ["sh", "-c", "sleep 3600"]
+```
+
+The toleration in the above Pod YAML has the exact key, value, and the effect as the taint on the
+node. Since it matches the taint, you can schedule it on that node. Since the **tolerations** field is an
+array, you can specify multiple tolerations. In case of multiple tolerations, **all** of them need to match
+for the Pod to be scheduled.
+
+If you already have a mix of Pods running on the node and want to evict the ones without the taint,
+you can use the **NoExecute** effect. When using **NoExecute** effect, you can also specify an optional
+**tolerationSeconds** field. The Pod that tolerates the taint remains running on the node for the
+duration specified in that field. Pods that don’t specify the **tolerationSeconds** field will remain
+bound to the node forever, and the ones with no tolerations will be evicted immediately.
+
+The difference between **NoSchedule** and **NoExecute** is that if the Pod is already running on the node
+before you apply the taint, the Pod won’t get rescheduled if using **NoSchedule**. However, if you use
+**NoExecute** the Pod might get evicted.
+
+The last effect is **PreferNoSchedule**. When using this effect, Kubernetes avoids scheduling Pods that
+don’t tolerate the taint. However, the Pods might still get scheduled onto these nodes if other nodes
+are at capacity.
+
