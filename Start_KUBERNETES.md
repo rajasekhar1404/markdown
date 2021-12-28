@@ -8414,3 +8414,391 @@ Reconciled {"controller": "pdfdocument", "request": "default/my-document"}
 
 This output message means that the PdfDocument resource was created and that the controller also
 created a Job:
+
+```
+$ kubectl get pdfdocument
+NAME AGE
+my-document 37s
+
+$ kubectl get job
+NAME COMPLETIONS DURATION AGE
+my-document-job 0/1 66s 66s
+
+$ kubectl get po
+NAME READY STATUS RESTARTS AGE
+my-document-job-rrvzz 1/1 Running 0 70s
+```
+
+Note that the Job won’t complete until the Pod finishes executing - we are running a sleep
+command, so that it gives us enough time to grab the converted PDF document from the Volume.
+
+To copy the PDF file from the container to the local machine, you can use the **kubectl cp** command:
+
+```
+$ kubectl cp my-document-job-rrvzz:/data/my-text.pdf ${PWD}/my-text.pdf
+```
+
+The above command copies a file from **/data/my-text.pdf** location inside the container (which is on
+the shared volume), and copies it to the current folder you’re running **kubectl** in.
+
+![Figure 48. Generated PDF Document](https://i.gyazo.com/64ed3e07ec87a5d1dc429bd4377fb484.png)
+
+_Figure 48. Generated PDF Document_
+
+Ensure you delete the CRD and the resource as the **make run** is not going to remove the deployed
+resources.
+
+## **Kubernetes Operators**
+
+Operators use custom resources and controllers to manage applications and their components. One
+of the Kubernetes operators' purposes is to automate tasks that a person operating a Kubernetes
+application would do. That way, you can simplify the installation and administration of your
+applications.
+
+Let’s look at a concrete example with the Istio service mesh. Installing and managing Istio service
+mesh was (and still is, to a certain extent) a complicated task. There are multiple components and
+various resources involved in operating a service mesh on Kubernetes. The way you would install
+Istio is to either render a full YAML template based on a configuration profile and deploy that, or
+you would use [Helm](https://helm.sh/). The initial installation usually worked fine. However, operators would run
+into issues later when they tried to re-configure the installation or upgrade components as it was
+challenging to administer.
+
+For that reason, Istio decided to implement an operator. Using the operator Istio significantly
+simplified the installation and administration of the mesh. Previously, you would have to run Helm
+and depend on a third-party tool for the installation. With the operator, you create a custom
+resource (**IstioControlPlane**) that 'describes' how you want your service mesh to look like. You can
+select a profile or fine-tune any of the configuration settings of the mesh.
+
+After you install the operator in your cluster, you can install the mesh using the custom resource,
+like the one below:
+
+```
+apiVersion: install.istio.io/v1alpha1
+kind: IstioOperator
+metadata:
+  namespace: istio-system
+  name: my-istiocontrolplane
+spec:
+  profile: demo
+```
+
+The controller responds to the resource being created, and starts installing Istio. Later, suppose you decide to change the configuration setting, you can use a different installation profile or even
+upgrade the installation, by updating the IstioOperator resource. The operator takes the update
+resources and reconfigures the installation. The knowledge that one needs to operate an
+application is now coded inside an operator, for everyone to use.
+
+In the [Create a controller]() section, we explained how to use Kubebuilder to build a custom resource
+controller. Just to be exact - the custom resource controller and operators are using the same things
+behind the scenes. Other tools are available for creating controllers or operators, such as [KUDO]() and
+Operator [Operator Framework](). KUDO provides you with a declarative approach to building
+Kubernetes operators, while the Operator Framework features an Operator SDK that makes it
+easier to build, test, and package Operators.
+
+Instead of writing custom code, as we did in [Create a controller](), some of these tools allow you to
+create Helm-based operators, for example.
+
+For example, let’s say you are creating an operator for your Cool App, called **coolapp-operator**.
+Using the Operator SDK, you can create a custom resource called **CoolApp** and handle the
+reconciliation logic.
+
+The first step is to initialize the operator using the Helm plugin, by running **operator-sdk init --plugins=helm**. This command will create initial the project structure, including the configuration,
+Dockerfile, and Makefile.
+
+Then, just like before, you need to create an API - this includes the group name, version, and the
+resource kind. For example:
+
+```
+$ operator-sdk create api --group k8s.startkubernetes.com --version v1 --kind CoolApp
+Created helm-charts/coolapp
+Generating RBAC rules
+WARN[0000] The RBAC rules generated in config/rbac/role.yaml are based on the chart's
+default manifest. Some rules may be missing for resources that are only enabled with
+custom values, and some existing rules may be overly broad. Double check the rules
+generated in config/rbac/role.yaml to ensure they meet the operator's permission
+requirements.
+```
+
+The above command will create the Helm chart, include the Deployment, Ingress, Service,
+ServiceAccount, and HorizontalPodAutoscaler resources for your application. Alternatively, if you
+already have a Helm chart you want to use, you can provide it using the **--help-chart-repo** flag to
+the **create api** command.
+
+The interesting part of this operator is in the **watches.yaml** file. In that file, you specify which
+resource you want the operator to watch for and create new Helm releases for:
+
+```
+# Use the 'create api' subcommand to add watches to this file.
+- group: k8s.startkubernetes.com.my.domain
+  version: v1
+  kind: CoolApp
+  chart: helm-charts/coolapp
+# +kubebuilder:scaffold:watch
+```
+
+### **Helm 101**
+
+Helm is the package manager for Kubernetes. As you’ve seen throughout this book, several
+Kubernetes resources together for your application. If you’re deploying a single resource, you can
+probably manage the YAML file and deployments manually. However, that’s usually not the case. If
+you try to manually manage, track, and update YAML files for your application, you will quickly
+notice that it can get relatively complicated, and it doesn’t make sense.
+
+Helm can help with this complexity. Helm allows you to templatize your YAML files. Let’s take a
+simple Deployment, for example:
+
+```
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simple-deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: test
+  template:
+    metadata:
+      labels:
+        app: test
+    spec:
+      containers:
+      - name: test
+      image: busybox
+      command: [ "sh", "-c", "sleep 1h"]
+```
+
+One of the things you will probably be updating in the YAML is the image name. Helm allows to
+'extract' these values into a separate values file (usually called **values.yaml**, but you can name it
+whatever you like). If we take the above Deployment and use the variable, here’s how it would look:
+
+```
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simple-deployment
+spec:
+  replicas: 1
+  selector:
+  matchLabels:
+  app: test
+  template:
+  metadata:
+  labels:
+  app: test
+  spec:
+  containers:
+  - name: test
+  image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+  command: [ "sh", "-c", "sleep 1h"]
+```
+
+Notice the image value consists of two values: the repository and tag. You can then store the actual
+values that will be replaced by Helm, in a **values.yaml** file, like this:
+```
+image:
+  repository: busybox
+  tag: "1.32"
+```
+
+The collection of all templatized files is called a **Helm chart**.
+
+If you try to deploy the above Deployment YAML, you will get an error. However, you can use Helm
+to take the values from the **values.yaml** file and replace them in Deployment file.
+
+```
+$ helm install -f values.yaml ./mychart
+```
+
+Once you install a Helm chart, you can upgrade it or create new releases by modifying the values
+file or passing in values you want to replace from the command line.
+
+Back to the **watches.yaml** file and the Operator SDK. Let’s look at the
+**config/samples/k8s.startkubernetes.com_v1_coolapp.yaml** file. The file shows an example of a
+CoolApp resource that define how you should configure the CoolApp.
+
+```
+apiVersion: k8s.startkubernetes.com.my.domain/v1
+kind: CoolApp
+metadata:
+  name: coolapp-sample
+spec:
+  # Default values copied from <project_dir>/helm-charts/coolapp/values.yaml
+  affinity: {}
+  autoscaling:
+  enabled: false
+  maxReplicas: 100
+  minReplicas: 1
+  targetCPUUtilizationPercentage: 80
+  fullnameOverride: ""
+  ...
+```
+
+The values in this resource are coming from the Helm **values.yaml** file. So if you deploy the CoolApp
+resource, the Operator SDK will invoke Helm behind the scenes and deploy the chart. Later, when
+you decide to change your application’s configuration, the Operator SDK will do the reconciliation
+and make sure your application is updated accordingly.
+
+To deploy the CoolApp operator, you can run **make install** from the operator folder. This will
+deploy the CRD:
+
+```
+$ kubectl api-resources | grep cool
+coolapps k8s.startkubernetes.com.my.domain
+true      CoolApp
+```
+
+The next step is to build the operator image, push it to a Docker registry, and deploy it to the cluster.
+
+
+**NOTE**
+> If you’re building your image, make sure to replace the image name in the
+command below.
+
+```
+export IMG=startkubernetes/coolapp-operator:0.1.0
+make docker-build docker-push IMG=$IMG
+```
+
+After you pushed the image, you can deploy the operator:
+
+```
+$ make deploy IMG=startkubernetes/coolapp-operator:0.1.0
+....
+rolebinding.rbac.authorization.k8s.io/coolapp-operator-leader-election-rolebinding
+created
+clusterrolebinding.rbac.authorization.k8s.io/coolapp-operator-manager-rolebinding
+created
+clusterrolebinding.rbac.authorization.k8s.io/coolapp-operator-proxy-rolebinding
+created
+service/coolapp-operator-controller-manager-metrics-service created
+deployment.apps/coolapp-operator-controller-manager created
+```
+
+Operator SDK creates the necessary Kubernetes resources and deploys the operator to coolapp-operator-system namespace:
+
+```
+$ kubectl get po -n coolapp-operator-system
+NAME READY STATUS RESTARTS
+AGE
+coolapp-operator-controller-manager-54bf54c4f9-kjvkb 2/2 Running 0
+107s
+```
+
+Let’s tail the logs from the **manager** container in the above Pod. Open a separate terminal window,
+and run: **kubectl logs coolapp-operator-controller-manager-54bf54c4f9-kjvkb -n coolapp-operator-system -c manager -f**.
+
+Now we can try deploying the sample CoolApp resource from **/config/samples/k8s.startkubernetes.com_v1_coolapp.yaml** by running **kubectl apply -f /config/samples/k8s.startkubernetes.com_v1_coolapp.yaml**.
+
+As you deploy the resource you will notice the logs from the **manager** containers saying that the
+release was installed:
+
+```
+...
+{"level":"info","ts":1600803466.9313226,"logger":"helm.controller","msg":"Installed
+release","namespace":"default","name":
+"coolapp-sample","apiVersion":"k8s.startkubernetes.com.my.domain/v1","kind":"CoolApp"
+,"release":"coolapp-sample"}
+...
+{"level":"info","ts":1600803470.5439534,"logger":"helm.controller","msg":"Reconciled
+release","namespace":"default","name"
+:"coolapp-sample","apiVersion":"k8s.startkubernetes.com.my.domain/v1","kind":
+"CoolApp","release":"coolapp-sample"}
+...
+```
+
+The operator installed the CoolApp using Helm. Under the covers, Helm created a release:
+
+```
+$ helm ls
+NAME            NAMESPACE       REVISION        UPDATED
+STATUS          CHART           APP VERSION
+coolapp-sample  default         1               2020-09-22 19:37:43.6701905 +0000 UTC
+deployed        coolapp-0.1.0   1.16.0
+```
+
+If you would edit the original resource, you will notice that the operator will pick it up and update
+the Helm release. To remove the deployed operator and other resources, run **make undeploy** from
+the root controller folder.
+
+# Practical Kubernetes
+
+## Using an Ingress controller for SSL termination
+
+SSL stands for secure socket layer protocol. The SSL termination, or also called SSL offloading, is the
+process of decrypting encrypted traffic. When encrypted traffic hits the ingress controller, it gets
+decrypted there and then passed to the backend applications. Doing SSL termination at the ingress
+controller level also lessens the burden on your server. You are only doing it once at the ingress
+controller level and not in each application.
+
+I will be using a cloud-managed cluster and an actual domain name to demonstrate how to set up
+SSL termination. I’ll be using the Ambassador controller, **cert-manager** for managing and issuing
+TLS certificates, **Let’s Encrypt** as the certificate authority (CA), and **Helm** to install some of the
+components.
+
+Before continuing, making sure you have installed Helm by following the instructions **here**. You can
+run **helm version** to make sure Helm is installed:
+
+```
+$ helm version
+version.BuildInfo{Version:"v3.2.4",
+GitCommit:"0ad800ef43d3b826f31a5ad8dfbb4fe05d143688", GitTreeState:"dirty",
+GoVersion:"go1.14.3"}
+```
+**NOTE**
+> Helm is a package manager for Kubernetes. Instead of dealing with individual
+deployments, services, configuration maps, secrets, and other Kubernetes resources,
+Helm packages them into "charts". A chart is a collection of different Kubernetes
+resource files. You can then take the charts and version, deploy, upgrade, and
+manage them as a single unit.
+
+### **Deploying the sample application**
+
+As a sample application, I will be using the Dog Pic website.
+
+*practical/dogpic-app.yaml*
+```
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dogpic-web
+  labels:
+    app.kubernetes.io/name: dogpic-web
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dogpic-web
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dogpic-web
+    spec:
+      containers:
+        - name: dogpic-container
+          image: learncloudnative/dogpic-service:0.1.0
+          ports:
+            - containerPort: 3000
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name: dogpic-service
+  labels:
+    app.kubernetes.io/name: dogpic-web
+spec:
+  selector:
+    app.kubernetes.io/name: dogpic-web
+  ports:
+    - port: 3000
+      name: http
+```
+Save the above YAML in **dogpic-app.yaml** file and use **kubectl apply -f dogpic-app.yaml** to create the
+deployment and service.
+
+### **Deploying cert-manager**
+
+We will deploy the cert-manager inside the cluster. As the name suggests, the cert-manager will
+deal with certificates. So, whenever we need a new certificate or renew an existing certificate, the
+cert-manager will do that for us.
+
+The first step is to create a namespace to deploy the cert-manager in:
