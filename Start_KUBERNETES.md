@@ -8018,3 +8018,399 @@ The last effect is **PreferNoSchedule**. When using this effect, Kubernetes avoi
 don’t tolerate the taint. However, the Pods might still get scheduled onto these nodes if other nodes
 are at capacity.
 
+# Extending Kubernetes
+
+## Using custom resource definitions (CRDs)
+
+Throughout this book, we discussed various Kubernetes resources, their purpose, how to use them,
+and how they work. However, you might run into scenarios where the existing resources are too
+limiting or not precisely what you need. For these purposes, Kubernetes also support **custom resource definitions (CRDs)**.
+
+Each resource in Kubernetes (Pod, Service, Deployment, etc.) is an endpoint in the Kubernetes API.
+This endpoint stores the collection of Kubernetes objects. You have seen an example of the API
+endpoint in the section called [What are service accounts?](). In that section, we were accessing the
+Pod information using an URL like this: https://kubernetes.default:443/api/v1/namespaces/default/ [pods/simple-pod](https://kubernetes.default/api/v1/namespaces/default/pods/simple-pod). Other Kubernetes services have similar endpoints in the API, and you can use that
+API to get the objects or create, update, and delete it. You can check out the full Kubernetes API
+reference [here](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.19/).
+
+Custom resources are a way of extending the Kubernetes API. You can develop your custom
+resource (for example, MyCoolPod) and install it on your cluster or any other Kubernetes clusters.
+Once the custom resource is installed, you can create its objects using the Kubernetes CLI, just like
+you would do it for Pods or Services. Let’s say you registered a custom resource called **MyCoolPod**.
+You could use **kubectl get mycoolpod** or **kubectl describe mycoolpod pod-instance** to interact with
+the object of the MyCoolPod kind.
+
+Custom resource on their own simply allows you to store and retrieve the data. To make them more
+powerful, you can combine them with a **custom controller**. Using a custom controller, you can get
+a proper declarative API that allows you to declare your resource’s desired state and keep the
+object’s current state in sync with the desired state. Just like the ReplicaSet controller does when it
+tries to maintain the Pod replicas.
+
+Let’s say we want to create a custom resource called PdfDocument that takes the text in the
+resource and saves it to an MD (Markdown) file and then converts it to a PDF file. We will use a
+Kubernetes Volume to store the MD and the PDF file. There are two init containers. The first one
+saves the text to .MD file, and the second one uses that .MD file to create a PDF file.
+
+![Figure 47. PdfDocument Flow](https://i.gyazo.com/b130b012ab7af34a49012ab650eda08b.png)
+
+*Figure 47. PdfDocument Flow*
+
+Here’s how the resource could look like:
+
+```
+kind: PdfDocument
+metadata:
+  name: my-document
+spec:
+  documentName: my-text
+  text: |
+    ### This is a title
+    Here is some **BOLD** text
+```
+
+If you try to create this resource using Kubernetes CLI, you’ll get an error because you haven’t
+provided the **apiVersion** field. We need a way to tell Kubernetes about the **PdfDocument** kind.
+
+###  **Create a CustomResourceDefinition**
+
+To be able to create custome resources, we need to tell Kubernetes about the resource. You can do
+that using a **CustomResourceDefinition** resource. Here’s how we would create the CRD for the
+**PdfDocument** type:
+
+_ch10/pdf-crd.yaml_
+```
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: pdfdocuments.k8s.startkubernetes.com
+spec:
+  group: k8s.startkubernetes.com
+  scope: Namespaced
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                documentName:
+                  type: string
+                text:
+                  type: string
+  names:
+    kind: PdfDocument
+    singular: pdfdocument
+    plural: pdfdocuments
+    shortNames:
+    - pdf
+    - pdfs
+```
+
+Save the YAML to **pdf-crd.yaml**. There’s a lot of going on in the YAML. Refer to the table below to
+understand the different fields, sections, and their usage.
+
+*Table 7. CRD Fields*
+
+| Field | Description | Example |
+|-------|------------|---------|
+| **name** | Name of the CRD must match the following format: plural.group. The values are coming from the fields with the same names, from the names section |**pdfdocuments.k8s.startkubernetes.com** |
+| **group** | Name of the group to use for the REST API. For example **/apis/[group]/[version]** | **k8s.startkubernetes.com** |
+| **scope** | Resource can be Namespaced or Cluster scoped | **Namespaced** or **Cluster** |
+| **versions** | List of all supported versions of the API | See the YAML |
+| **plural** | Plural name of the resource. Used in the REST API URL: **/apis/[group]/[version]/[plura l]** |**pdfdocuments** |
+| **singular** | Singular name of the resource. Use as an alias the CLI (e.g., **kubectl get [singular]**) | **pdfdocument** |
+| **shortNames** | Short names used for the resource in the CLI | **pdf**, **pdfs** |
+
+The schema of the resource is specified using the [OpenAPI v3.0 specification format](https://swagger.io/specification/). OpenAPI v3.0
+spec also allows you to define a more structural schema, where you can define required fields or
+patterns field values need to conform to. For example, if we wanted to restrict the values for the
+**documentName** field to lowercase names with exactly ten characters, we could do it using the **pattern** field:
+```
+...
+documentName:
+  type: string
+  pattern: '^[a-z]{10}$'
+```
+
+Let’s create the CustomResourceDefinition.
+
+```
+$ kubectl apply -f pdf-crd.yaml
+customresourcedefinition.apiextensions.k8s.io/pdfdocuments.k8s.startkubernetes.com
+created
+```
+
+You can now use **pdf**, **pdfs** or **pdfdocument** to list the PdfDocument resouces in the cluster. The
+resource kind is also visible when you run the **api-resources command**:
+
+```
+$ kubectl get pdfdocument
+No resources found in default namespace.
+
+$ kubectl get pdf
+No resources found in default namespace.
+
+$ kubectl api-resources | grep pdf
+NAME SHORTNAMES APIGROUP
+NAMESPACED KIND
+...
+pdfdocuments pdf,pdfs k8s.startkubernetes.com true
+PdfDocument
+...
+```
+
+Kubernetes also creates a new namespaced REST API endpoint for the **pdfresources**. Let’s look at
+how we can access the API. You have already talked to the Kubernetes API in the [Bindings]() section,
+where we accessed the API through a Pod. We will use **kubectl proxy** command to set up a proxy to
+the API server this time.
+
+Open a separate terminal window and start the proxy:
+
+```
+$ kubectl proxy --port=8080
+Starting to serve on 127.0.0.1:8080
+```
+
+Leave the proxy running, and from a different terminal, you can now access the Kubernetes API.
+For example, to get the list of all supported APIs, run:
+
+```
+$ curl localhost:8080/apis
+...
+    {
+    "name": "k8s.startkubernetes.com",
+    "versions": [
+    {
+      "groupVersion": "k8s.startkubernetes.com/v1",
+      "version": "v1"
+      }
+  ],
+    "preferredVersion": {
+    "groupVersion": "k8s.startkubernetes.com/v1",
+    "version": "v1"
+  }
+  },
+...
+```
+
+To access the PdfDocuments API, you have to use the API name and the version, like this:
+
+```
+$ curl localhost:8080/apis/k8s.startkubernetes.com/v1/namespaces/default/pdfdocuments
+{"apiVersion":"k8s.startkubernetes.com/v1","items":[],"kind":"PdfDocumentList","metada
+ta":{"continue":"","resourceVersion":"21553","selfLink":"/apis/k8s.startkubernetes.com
+/v1/namespaces/default/pdfdocuments"}}
+```
+
+We get back an empty list of items,because we haven’t created the PdfDocument resource yet. Now
+that the API is registered and we have the **apiVersion**, we can create and deploy the PdfDocument.
+The **apiVersion** consists of the group name and one of the support versions. In this case, the
+**apiVersion is k8s.startkubernetes.com/v1**.
+
+*ch10/my-document.yaml*
+```
+apiVersion: k8s.startkubernetes.com/v1
+kind: PdfDocument
+metadata:
+  name: my-document
+spec:
+  documentName: my-text
+  text: |
+      ### This is a title
+      Here is some **BOLD** text
+```
+
+Save the above YAML to **my-document.yaml** and create the PdfDocument resource.
+
+```
+$ kubectl apply -f my-document.yaml
+pdfdocument.k8s.startkubernetes.com/my-document created
+```
+
+If you list the **pdfs** you will see the resource we created. You can also look at the YAML
+representation of the resource and the fields Kubernetes added.
+
+```
+$ kubectl get pdfs
+NAME AGE
+my-document 57s
+
+$ kubectl describe pdf my-document
+Name: my-document
+Namespace: default
+Labels: <none>
+Annotations: <none>
+API Version: k8s.startkubernetes.com/v1
+Kind: PdfDocument
+Metadata:
+  Creation Timestamp: 2020-09-21T22:37:30Z
+  Generation: 1
+  Managed Fields:
+    API Version: k8s.startkubernetes.com/v1
+    Fields Type: FieldsV1
+    fieldsV1:
+      f:metadata:
+        f:annotations:
+          .:
+          f:kubectl.kubernetes.io/last-applied-configuration:
+      f:spec:
+        .:
+        f:documentName:
+        f:text:
+      Manager: kubectl-client-side-apply
+      Operation: Update
+      Time: 2020-09-21T22:37:30Z
+    Resource Version: 21796
+    Self Link:
+  /apis/k8s.startkubernetes.com/v1/namespaces/default/pdfdocuments/my-document
+  UID: 62283c82-cbb3-4676-b71d-770004151c6d
+Spec:
+  Document Name: my-text
+  Text: ### This is a title
+Here is some **BOLD** text
+
+Events: <none>
+```
+
+The resource behaves just like any other Kubernetes resource. Without a controller, the resource is
+useless. Let’s see how we can create a simple controller. The controller creates a Job whenever you
+create a new PdfDocument resource. The Job takes the text from the resource and uses init
+containers to create a PDF document from it.
+
+## Create a controller
+
+The PdfDocument controller will watch the PdfDocument resources and act accordingly. Whenever
+you create or update a PdfDocument resource, the controller creates a Job that generates a PDF
+document from the text inside the resource. I’ve used the **Kubebuilder** to build the CRD and the
+controller. You will also need **Kustomize** to build the controller locally.
+
+Once you have installed Kubebuilder, you can initialize the project:
+
+```
+$ go mod init k8s.startkubernetes.com/v1
+go: creating new go.mod: module k8s.startkubernetes.com/v1
+
+$ kubebuilder init
+Writing scaffold for you to edit...
+Get controller runtime:
+...
+go build -o bin/manager main.go
+Next: define a resource with:
+$ kubebuilder create api
+```
+
+The kubebuilder creates the project structure and other files for the controller. The next step is to
+create the code, and struct for the custom resource using the kubebuilder create api command:
+
+```
+$ kubebuilder create api --group k8s.startkubernetes.com --version v1 --kind
+PdfDocument
+Create Resource [y/n]
+y
+Create Controller [y/n]
+y
+Writing scaffold for you to edit...
+api/v1/pdfdocument_types.go
+controllers/pdfdocument_controller.go
+...
+```
+
+The command creates the api/v1 folder with the emtpy resource type. I’ve added the two fields that
+we one in the spec section to the pdfdocument_types.go file:
+
+```
+type PdfDocumentSpec struct {
+  
+  // INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
+  // Important: Run "make" to regenerate code after modifying this file
+  DocumentName string `json:"documentName,omitempty"`
+  Text string `json:"text,omitempty"`
+}
+```
+
+The next part is to implement a controller inside the **controllers/pdfdocument_controller.go** file. To
+implement the functionality, I am using two init containers (you can read more about in [Init containers]() section). The first init container reads the **text** from the resource and stores it in a **.md** file on a Volume, shared between all containers.
+
+Once the **.md** file is stored, the second init container runs **pandoc** to converts the **.md** file into the PDF file. This file is stored on the shared volume as well.
+
+Finally, the main container will just sleep, so that we can copy the result over to the local machine.
+To make this more realistic, you could use a persistent volume and store the converted PDF
+documents there. For the sake of simplicity and to demonstrate how controllers work, I am using a
+regular volume.
+
+The logic in the **Reconcile** function in **pdfdocument_controller.go** looks like this:
+
+```
+  var pdfDoc k8sstartkubernetescomv1.PdfDocument
+  if err := r.Get(ctx, req.NamespacedName, &pdfDoc); err != nil {
+  log.Error(err, "unable to fetch PdfDocument")
+  return ctrl.Result{}, client.IgnoreNotFound(err)
+  }
+  jobSpec, err := r.createJob(pdfDoc)
+  if err != nil {
+  log.Error(err, "failed to create Job spec")
+  return ctrl.Result{}, client.IgnoreNotFound(err)
+  }
+  if err := r.Create(ctx, &jobSpec); err != nil {
+  log.Error(err, "unable to create Job")
+  }
+```
+
+The main function of every controller is the **Reconcile** function. During the reconciliation process,
+the controller needs to ensure that the actual state in the cluster matches the desired state in the
+object. Each controller focuses on a single kind of resource, but that doesn’t prevent you from
+interacting with other kinds and resources. In our case, we will be creating a Job in addition to
+reading the PdfDocument kind.
+
+If we encounter any errors during the reconciliation, we return an error from the function.
+Otherwise, we return an empty result that indicates we successfully reconciled the object.
+
+The full source code for the controller is available **customcontroller** folder with other source code.
+
+To test the controller against the current cluster, you can use the **make run** command:
+
+```
+$ make run
+/Users/peterj/projects/go/bin/controller-gen object:headerFile="hack/boilerpla
+te.go.txt" paths="./..."
+go fmt ./...
+go vet ./...
+/Users/peterj/projects/go/bin/controller-gen "crd:trivialVersions=true" rbac:r
+oleName=manager-role webhook paths="./..." output:crd:artifacts:config=config/
+crd/bases
+go run ./main.go
+2020-09-21T18:26:49.349-0700 INFO controller-runtime.metrics metric
+s server
+....
+```
+
+Once the controller is running, you can create the PdfDocument resource, just like you did before.
+
+*ch10/my-document.yaml*
+```
+apiVersion: k8s.startkubernetes.com/v1
+kind: PdfDocument
+metadata:
+  name: my-document
+spec:
+  documentName: my-text
+  text: |
+      ### This is a title
+      Here is some **BOLD** text
+```
+
+Save the above YAML to **my-document.yaml** and create the PdfDocument resource using **kubectl apply
+-f my-document.yaml**. As Kubernetes creates the resource you will notice the following output from
+the controller:
+
+```
+2020-09-21T18:41:26.852-0700 DEBUG controller-runtime.controller Successfully
+Reconciled {"controller": "pdfdocument", "request": "default/my-document"}
+```
+
+This output message means that the PdfDocument resource was created and that the controller also
+created a Job:
