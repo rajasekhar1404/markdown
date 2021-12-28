@@ -7114,3 +7114,469 @@ HTTP/1.1 200 OK
 
 The call completes successfully. Let’s define a network policy that will prevent egress for Pods with
 the label **app.kubernetes.io/name: hello**:
+
+*ch8/deny-egress-hello.yaml*
+
+```
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-egress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: hello
+  policyTypes:
+    - Egress
+```
+
+If you run the same command this time, **curl** won’t be able to resolve the host:
+
+```
+$ kubectl exec -it no-egress-pod -- curl -I -L google.com
+curl: (6) Couldn't resolve host 'google.com'
+```
+
+Try running **kubectl edit pod no-egress-pod** and change the label value to **hello123**. Save the
+changes and then re-run the curl command. This time, the command works fine because we
+changed the Pod label, and the network policy does not apply to it anymore.
+
+### **Common Network Policies**
+
+Let’s look at a couple of scenarios and corresponding network policies.
+
+**Deny all egress traffic**
+
+Denies all egress traffic from the Pods in the namespace, and Pods cannot make any outgoing
+requests.
+
+*ch8/deny-all-egress.yaml*
+
+```
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-all-egress
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+```
+
+**Deny all ingress traffic**
+
+Denies all ingress traffic, and Pods cannot receive any requests.
+
+*ch8/deny-all-ingress.yaml*
+```
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-all-ingress
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+```
+
+**Allow ingress traffic to specific Pods**
+
+Allow ingress to specific Pods, identified by a label.
+
+*ch8/pods-allow-all.yaml*
+
+```
+kind: NetworkPolicy
+apiVersion: networking.k8s.io/v1
+metadata:
+  name: pods-allow-all
+spec:
+  podSelector:
+    matchLabels:
+      app: my-app
+  ingress:
+    - {}
+```
+
+*Deny ingress to specific Pods*
+
+Denies ingress to specific Pods, identified by a label.
+
+*ch8/pods-deny-all.yaml*
+
+```
+kind: NetworkPolicy
+apiVersion: networking.k8s.io/v1
+metadata:
+  name: pods-deny-all
+spec:
+  podSelector:
+    matchLabels:
+      app: my-app
+  ingress: []
+```
+
+**Restrict traffic to specific Pods**
+
+Allows traffic from certain Pods only. Allow traffic from **app: customers** to any frontend Pods (**role:
+frontend**) that are part of the same app (**app: customers**).
+
+*ch8/frontend-allow.yaml*
+```
+kind: NetworkPolicy
+apiVersion: networking.k8s.io/v1
+metadata:
+  name: frontend-allow
+spec:
+  podSelector:
+    matchLabels:
+      app: customers
+      role: frontend
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: customers
+```
+
+**Deny all traffic to and within a namespace**
+
+Denies all incoming traffic (no ingress rules defined) to all Pods (empty **podSelector**) in the **prod**
+namespace. Any calls from outside of the **default** namespace will be blocked and any calls between
+Pods in the same namespace.
+
+*ch8/prod-deny-all.yaml*
+
+```
+kind: NetworkPolicy
+apiVersion: networking.k8s.io/v1
+metadata:
+  name: prod-deny-all
+  namespace: prod
+spec:
+  podSelector: {}
+  ingress: []
+```
+
+**Deny all traffic from other namespaces**
+
+Denies all traffic from other namespaces, coming to the **Pods** in the prod namespace. It matches all
+pods (empty **podSelector**) in the **prod** namespace and allows ingress from all Pods in the prod
+namespace, as the ingress **podSelector** is empty as well.
+
+*ch8/deny-other-namespaces.yaml*
+```
+kind: NetworkPolicy
+apiVersion: networking.k8s.io/v1
+metadata:
+  name: deny-other-namespaces
+  namespace: prod
+spec:
+  podSelector: {}
+  ingress:
+    - from:
+        - podSelector: {}
+```
+
+**Deny all egress traffic for specific Pods**
+
+Denies Pods labeled with **app: api** from making any external calls.
+
+*ch8/api-deny-egress.yaml*
+
+```
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api-deny-egress
+spec:
+  podSelector:
+    matchLabels:
+      app: api
+  policyTypes:
+    - Egress
+  egress: []
+```
+
+# Scaling and Resources
+
+## Scaling and autoscaling Pods
+
+In [Managing Pods with ReplicaSets](), we discussed how to manually scale the Pods by increasing the
+value in the **replicas** field. Scaling where you’re increasing the number of Pod instances is also
+called **horizontal scaling**.
+
+The other type of scaling we will discuss in this chapter is **vertical scaling**, where you’re increasing
+the number of resources (CPU and memory) containers can consume.
+
+![Figure 46. Scaling Pods](https://i.gyazo.com/6c9e2ac8883b398c92583f488b322646.png)
+
+*Figure 46. Scaling Pods*
+
+To gather the CPU and memory information, you need to install the metrics server. The **metrics
+server** aggregates the resource usage data across the cluster. Through the metrics API, you can get
+the number of resources used by nodes or Pods. There are two metrics reported: CPU and memory.
+
+If you’re using Minikube, you have to enable the **metrics-server** addon before using the HPA. To
+enable the **metrics-server** addon, run:
+
+```
+$ minikube addons enable metrics-server
+ἱ The 'metrics-server' addon is enabled
+```
+
+You can check metrics server was installed by looking at the **apiservice** and the Deployment called
+**metrics-server** that Minikube created in the **kube-system** namespace:
+
+```
+$ kubectl get apiservices | grep metrics
+v1beta1.metrics.k8s.io                kube-system/metrics-server    True 3m20s
+
+$ kubectl get deployment metrics-server -n kube-system
+NAME              READY       UP-TO-DATE      AVAILABLE       AGE
+metrics-server    1/1         1               1               5m4s
+```
+
+With the metrics server installed, you can use the **kubectl top** command. The **top** command allows
+you to see the resource consumption for nodes and Pods.
+
+```
+$ kubectl top nodes
+NAME        CPU(cores)    CPU%    MEMORY(bytes)       MEMORY%
+minikube    437m          7%      594Mi               6%
+```
+
+Let’s look at how you can specify the amount of resources your Pods need and how you can limit
+the resources they consume.
+
+## Resource requests and limits
+
+For each container in a Pod, you can specify the resource **request**. Assuming your cluster has
+multiple nodes, Kubernetes uses this information to decide which node to place the Pod on. For
+example, if you set the memory request to 512 MiB and Kubernetes places the container on a node
+with 12 GiB, then the container can use up more memory (assuming no other Pods is running on
+that node).
+
+To limit how much resources container consumes, you can specify the resource **limit**. The limit
+prevents the container from using more than you specified. If we continue with the previous
+example, if the request is set to 512 MiB and limit to 1024 MiB, regardless of how much memory is
+available on the node, the container will never use more than 1024 MiB. If the container’s process
+tries to allocate more than the specified limit, the system kernel will terminate the process.
+
+As mentioned earlier, there are two resources, CPU and memory. CPU represents the compute
+processing,and you can specify it in units of **Kubernetes CPUs**. The CPU resources are measured in
+"**cpu**" units. One "cpu" unit in Kubernetes is equivalent to 1 vCPU/Core for cloud providers and 1
+hyperthread on bare-metal Intel processors. You can also request fractional units. For example, the
+value of **0.1** is equivalent to **100m** or 100 millicpu.
+
+Memory is measured in bytes. The value can be expressed as an integer or a fixed-point number,
+using the following suffixes: E, P, T, G, M, K (exabyte, petabyte, terabyte, gigabyte, megabyte, and
+kilobyte). You can also use the power-of-two equivalents: Ei, Pi, Ti, Gi, Mi, Ki (exbibyte, pebibyte,
+tebibyte, gibibyte, mebibyte, kibibyte). For example, 128 MiB is about 134 MB.
+
+Both CPU and memory limits and requests can be specified under the **resources** field, like this:
+
+*ch9/memory-sample.yaml*
+```
+apiVersion: v1
+kind: Pod
+metadata:
+  name: memory-sample
+spec:
+  containers:
+    - name: stress
+      image: polinux/stress
+      resources:
+        limits:
+          memory: "200Mi"
+        requests:
+          memory: "100Mi"
+      command: ["stress"]
+      args: ["--vm", "1", "--vm-bytes", "150M", "--vm-hang", "1"]
+```
+
+Save the above YAML to *memory-sample.yaml* and create the Pod using *kubectl apply -f memory-sample.yaml.* If you look at the memory consumption with top, **you** will see the memory is at 150 Mi,
+which is above the requested (**100Mi**) and below the limit (**200Mi**):
+
+```
+$ kubectl top po memory-sample
+NAME CPU(cores) MEMORY(bytes)
+memory-sample 75m 150Mi
+```
+
+Let’s see what happens if we try to exceed the memory limit. We will use the same limit and
+requests as before, but instead, we will pass in **250M** to the **stress** command.
+
+**NOTE**
+> **stress** is a Linux tool for load and stress testing. You can read more about it [here](https://linux.die.net/man/1/stress).
+
+*ch9/exceed-limit.yaml*
+```
+apiVersion: v1
+kind: Pod
+metadata:
+  name: memory-sample
+spec:
+  containers:
+    - name: stress
+      image: polinux/stress
+      resources:
+        limits:
+          memory: "200Mi"
+        requests:
+          memory: "100Mi"
+      command: ["stress"]
+      args: ["--vm", "1", "--vm-bytes", "250M", "--vm-hang", "1"]
+```
+
+Save the above YAML to **exceed-limit.yaml** and create the Pod using **kubectl apply -f exceed-limit.yaml**. If you look at the Pods, you will notice Kubernetes killed the Pod:
+
+```
+$ kubectl get po
+NAME            READY      STATUS       RESTARTS      AGE
+memory-sample   0/1        OOMKilled    0             5s
+```
+
+The **OOMKilled** status means that Kubernetes killed the Pod because it exceeded the limit and is Out Of Memory. Let’s kill the Pod with **kubectl delete pod memory-sample**.
+
+Another scenario you might run into, especially if you’re running a local cluster, is if you try to run
+too many workloads, and the nodes cannot accommodate them. Let’s try to simulate this scenario
+by requesting more memory that’s available in the cluster.
+
+_ch9/memory-hog.yaml_
+```
+apiVersion: v1
+kind: Pod
+metadata:
+  name: memory-hog
+spec:
+  containers:
+    - name: stress
+      image: polinux/stress
+      resources:
+        limits:
+          memory: "1000Gi"
+        requests:
+          memory: "1000Gi"
+      command: ["stress"]
+      args: ["--vm", "1", "--vm-bytes", "250M", "--vm-hang", "1"]
+```
+
+Save the above YAML to **memory-hog.yaml** and create the Pod using **kubectl apply -f memory-hog.yaml**.
+If you look at the Pod, you will notice that it’s **Pending**. Running the **describe** command shows the
+reason for the status:
+
+```
+$ kubectl describe po memory-hog
+...
+Events:
+  Type Reason Age From Message
+  ---- ------ ---- ---- -------
+  Warning FailedScheduling 43s (x2 over 43s) default-scheduler 0/1 nodes are
+available: 1 Insufficient memory.
+```
+
+Delete the Pod with kubectl **delete po memory-hog**.
+
+You can set the CPU requests and limits similarly as you did the memory. If we set **cpu** field to a
+crazy number of 100 CPUs you will get a similar error as we did with the memory.
+
+_ch9/cpu-hog.yaml_
+```
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cpu-hog
+spec:
+  containers:
+    - name: stress
+      image: polinux/stress
+      resources:
+        limits:
+          cpu: "100"
+        requests:
+          cpu: "100"
+      command: ["stress"]
+      args: ["--cpu", "2"]
+```
+
+Save the above YAML to **cpu-hog.yaml** and create the Pod using **kubectl apply -f cpu-hog.yaml**.
+Then, look at the Pod details for the error:
+
+```
+$ kubectl describe po cpu-hog
+...
+  Type Reason Age From Message
+  ---- ------ ---- ---- -------
+  Warning FailedScheduling 80s (x2 over 81s) default-scheduler 0/1 nodes are
+available: 1 Insufficient cpu.
+```
+
+Before continuing, delete the **cpu-hog** Pod using **kubectl delete po cpu-hog**.
+
+When designing your Pods, make sure you configure the limits and requests. That way, you can
+make efficient use of the available resources. If you don’t specify the limits, your containers don’t
+have an upper bound. You could potentially run into a situation where a single container can use
+up all available memory.
+
+## Resource quotas
+If you are working with a cluster shared between multiple team members and namespaces, it is
+important to enable resource quotas on the namespace. With a quoate you can limit the total
+resources that can be requested in a given namespaces.
+
+In addition to the CPU and memory quotas, you can also enable **storage quotas** and **object count**
+quotas. The storage quota can limit the number of storage resources - the number of persistent
+volume claims and the sum of storage requests. With the object count quota, you can go a step
+further and limit the number of specific resources created in a namespace. For example, you can
+limit the number of Secrets, Services, ConfigMaps, and other Kubernetes resources.
+
+The resource for defining quotas is called a **ResourceQuota**. Here’s a sample quota that limits the
+number of Pods to 5:
+
+*ch9/res-quota.yaml*
+```
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: res-quota
+spec:
+  hard:
+    pods: "5"
+```
+
+Save the above YAML to **res-quota.yaml** and create the ResourceQuota using **kubectl apply -f res-quota.yaml**. Next, we will create Deployment and then try to scale it over the limit of 5 Pods.
+
+*ch9/quota-deployment.yaml*
+```
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello
+  labels:
+    app.kubernetes.io/name: hello
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: hello
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: hello
+    spec:
+      containers:
+        - name: hello-container
+          image: busybox
+          command: ["sh", "-c", "echo Hello from my container! && sleep 3600"]
+```
+
+Save the above YAML to **quota-deployment.yam**l and create the Deployment using **kubectl apply -f
+quota-deployment.yaml**.
+
+Now you can try and scale the Deployment to 10 replicas:
+
+```
+$ kubectl scale deploy hello --replicas=10
+```
+
+If you list the Pods, there will be five of them running. If you look at the events, you will see the
